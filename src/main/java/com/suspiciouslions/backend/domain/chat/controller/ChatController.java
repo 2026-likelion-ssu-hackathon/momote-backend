@@ -17,6 +17,10 @@ import org.springframework.web.server.ResponseStatusException;
 import com.suspiciouslions.backend.domain.chat.dto.ChatRoomResponse;
 import com.suspiciouslions.backend.domain.chat.dto.MessageResponse;
 import com.suspiciouslions.backend.domain.chat.dto.SendMessageRequest;
+import com.suspiciouslions.backend.domain.chat.dto.CreateChatRoomResponse;
+import com.suspiciouslions.backend.domain.chat.dto.JoinChatRoomRequest;
+import com.suspiciouslions.backend.domain.chat.dto.JoinChatRoomResponse;
+import com.suspiciouslions.backend.domain.chat.dto.ParticipantClaimResponse;
 import com.suspiciouslions.backend.domain.chat.service.ChatService;
 
 import io.swagger.v3.oas.annotations.Operation;
@@ -32,6 +36,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.NotBlank;
 
 @RestController
 @RequestMapping("/api/chat-rooms")
@@ -65,6 +70,39 @@ public class ChatController {
 
 	public ChatController(ChatService chatService) {
 		this.chatService = chatService;
+	}
+
+	@Operation(summary = "초대 코드 채팅방 생성", description = "첫 임시 참가자와 6자리 초대 코드를 생성합니다.", tags = "Chat Rooms")
+	@ApiResponses(@ApiResponse(responseCode = "200", description = "생성 성공"))
+	@PostMapping
+	public CreateChatRoomResponse createChatRoom() {
+		return chatService.createChatRoom();
+	}
+
+	@Operation(summary = "초대 코드로 채팅방 입장", description = "두 번째 임시 참가자를 등록합니다.", tags = "Chat Rooms")
+	@ApiResponses({
+			@ApiResponse(responseCode = "200", description = "입장 성공"),
+			@ApiResponse(responseCode = "404", description = "초대 코드를 찾을 수 없음", content = @Content),
+			@ApiResponse(responseCode = "409", description = "이미 참가자가 두 명인 방", content = @Content)
+	})
+	@PostMapping(path = "/join", consumes = MediaType.APPLICATION_JSON_VALUE)
+	public JoinChatRoomResponse joinChatRoom(@Valid @RequestBody JoinChatRoomRequest request) {
+		return chatService.joinChatRoom(request.inviteCode());
+	}
+
+	@Operation(summary = "참가자 닉네임 등록", description = "해당 방의 아직 등록하지 않은 참가자 닉네임을 등록합니다. 프로필 파일은 처리하지 않습니다.", tags = "Chat Rooms")
+	@ApiResponses({
+			@ApiResponse(responseCode = "200", description = "등록 성공"),
+			@ApiResponse(responseCode = "403", description = "다른 방의 사용자", content = @Content),
+			@ApiResponse(responseCode = "404", description = "사용자 또는 채팅방을 찾을 수 없음", content = @Content),
+			@ApiResponse(responseCode = "409", description = "이미 등록했거나 두 참가자 모두 등록됨", content = @Content)
+	})
+	@PostMapping(path = "/{chatRoomId}/participants/claim", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+	public ParticipantClaimResponse claimNickname(
+			@PathVariable @Positive Long chatRoomId,
+			@RequestHeader("X-User-Id") @Positive Long userId,
+			@RequestParam @NotBlank String nickname) {
+		return chatService.claimNickname(chatRoomId, userId, nickname);
 	}
 
 	@Operation(summary = "채팅방 조회", description = "참여 중인 채팅방과 상대방 정보를 조회합니다.", tags = "Chat Rooms")
