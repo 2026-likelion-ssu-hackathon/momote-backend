@@ -52,6 +52,9 @@ public class AiAnalysisRequestService {
 	public AiAnalysisRequest create(Long chatRoomId) {
 		ChatRoom chatRoom = chatRoomRepository.findWithUsersById(chatRoomId)
 				.orElseThrow(() -> new IllegalArgumentException("Chat room not found: " + chatRoomId));
+		if (chatRoom.getUserB() == null) {
+			throw new IllegalStateException("Chat room is waiting for a second participant: " + chatRoomId);
+		}
 
 		List<Message> recentMessages = new ArrayList<>(messageRepository
 				.findByChatRoomIdOrderBySentAtDescIdDesc(chatRoomId, PageRequest.of(0, MESSAGE_LIMIT)));

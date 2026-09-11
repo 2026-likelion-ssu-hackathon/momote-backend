@@ -23,7 +23,7 @@ public class User {
 	@Column(name = "provider_user_id")
 	private String providerUserId;
 
-	@Column(nullable = false)
+	@Column
 	private String nickname;
 
 	@Column(name = "profile_image_url")
@@ -74,5 +74,10 @@ public class User {
 
 	public OffsetDateTime getUpdatedAt() {
 		return updatedAt;
+	}
+
+	public void claimNickname(String nickname, OffsetDateTime updatedAt) {
+		this.nickname = nickname;
+		this.updatedAt = updatedAt;
 	}
 }

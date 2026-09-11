@@ -96,7 +96,7 @@ class BackendApplicationTests {
 	}
 
 	@Test
-	void flywayCreatesCoreAndEmotionTables() {
+	void flywayCreatesCoreEmotionAndInviteCodeSchema() {
 		List<String> migrations = jdbcTemplate.queryForList("""
 				SELECT version
 				FROM flyway_schema_history
@@ -115,7 +115,7 @@ class BackendApplicationTests {
 				ORDER BY table_name
 				""", String.class);
 
-		assertEquals(List.of("1", "2"), migrations);
+		assertEquals(List.of("1", "2", "3"), migrations);
 		assertEquals(List.of(
 				"ai_results",
 				"chat_rooms",
@@ -124,6 +124,36 @@ class BackendApplicationTests {
 				"messages",
 				"users"
 		), tables);
+
+		List<String> nullableColumns = jdbcTemplate.queryForList("""
+				SELECT table_name || '.' || column_name
+				FROM information_schema.columns
+				WHERE table_schema = 'public'
+				  AND (table_name = 'users' AND column_name = 'nickname' OR table_name = 'chat_rooms' AND column_name = 'user_b_id')
+				  AND is_nullable = 'YES'
+				ORDER BY table_name, column_name
+				""", String.class);
+		List<String> inviteCodeColumns = jdbcTemplate.queryForList("""
+				SELECT column_name
+				FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = 'chat_rooms' AND column_name = 'invite_code'
+				""", String.class);
+		List<String> inviteCodeUniqueConstraints = jdbcTemplate.queryForList("""
+				SELECT tc.constraint_name
+				FROM information_schema.table_constraints tc
+				JOIN information_schema.key_column_usage kcu
+				  ON tc.constraint_catalog = kcu.constraint_catalog
+				 AND tc.constraint_schema = kcu.constraint_schema
+				 AND tc.constraint_name = kcu.constraint_name
+				WHERE tc.table_schema = 'public'
+				  AND tc.table_name = 'chat_rooms'
+				  AND tc.constraint_type = 'UNIQUE'
+				  AND kcu.column_name = 'invite_code'
+				""", String.class);
+
+		assertEquals(List.of("chat_rooms.user_b_id", "users.nickname"), nullableColumns);
+		assertEquals(List.of("invite_code"), inviteCodeColumns);
+		assertEquals(List.of("uq_chat_rooms_invite_code"), inviteCodeUniqueConstraints);
 	}
 
 	@Test

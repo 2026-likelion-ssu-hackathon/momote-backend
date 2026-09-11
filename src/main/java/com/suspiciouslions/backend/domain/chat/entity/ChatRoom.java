@@ -29,9 +29,12 @@ public class ChatRoom {
 	@JoinColumn(name = "user_a_id", nullable = false)
 	private User userA;
 
-	@ManyToOne(fetch = FetchType.LAZY, optional = false)
-	@JoinColumn(name = "user_b_id", nullable = false)
+	@ManyToOne(fetch = FetchType.LAZY)
+	@JoinColumn(name = "user_b_id")
 	private User userB;
+
+	@Column(name = "invite_code", unique = true)
+	private String inviteCode;
 
 	@Column(name = "relationship_started_on")
 	private LocalDate relationshipStartedOn;
@@ -69,6 +72,18 @@ public class ChatRoom {
 
 	public User getUserB() {
 		return userB;
+	}
+
+	public String getInviteCode() {
+		return inviteCode;
+	}
+
+	public void assignUserB(User userB) {
+		this.userB = userB;
+	}
+
+	public void assignInviteCode(String inviteCode) {
+		this.inviteCode = inviteCode;
 	}
 
 	public LocalDate getRelationshipStartedOn() {

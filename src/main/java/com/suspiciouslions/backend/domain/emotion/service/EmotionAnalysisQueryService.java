@@ -42,7 +42,7 @@ public class EmotionAnalysisQueryService {
 		ChatRoom chatRoom = chatRoomRepository.findWithUsersById(chatRoomId)
 				.orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Chat room not found"));
 		if (!Objects.equals(chatRoom.getUserA().getId(), userId)
-				&& !Objects.equals(chatRoom.getUserB().getId(), userId)) {
+				&& (chatRoom.getUserB() == null || !Objects.equals(chatRoom.getUserB().getId(), userId))) {
 			throw new ResponseStatusException(HttpStatus.FORBIDDEN, "User is not a chat room participant");
 		}
 
