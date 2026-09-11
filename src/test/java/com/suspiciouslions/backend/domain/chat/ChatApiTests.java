@@ -12,12 +12,22 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.SimpleTransactionStatus;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.testcontainers.junit.jupiter.Container;
@@ -33,10 +43,21 @@ import com.suspiciouslions.backend.domain.chat.service.ChatService;
 import com.suspiciouslions.backend.domain.chat.dto.CreateChatRoomResponse;
 import com.suspiciouslions.backend.domain.user.entity.User;
 import com.suspiciouslions.backend.domain.user.repository.UserRepository;
+import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage;
+import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage.UploadedProfileImage;
+import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorageException;
 
 import static org.hamcrest.Matchers.hasItem;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -44,6 +65,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 @Testcontainers
 @Transactional
+@Import(ChatApiTests.ProfileImageStorageTestConfig.class)
 class ChatApiTests {
 
 	@Container
@@ -64,6 +86,14 @@ class ChatApiTests {
 
 	@Autowired
 	private ChatService chatService;
+
+	@Autowired
+	private FakeProfileImageStorage profileImageStorage;
+
+	@BeforeEach
+	void resetProfileImageStorage() {
+		profileImageStorage.reset();
+	}
 
 	@Test
 	void participantGetsChatRoomAndPartner() throws Exception {
@@ -108,6 +138,120 @@ class ChatApiTests {
 				.contentType(MediaType.MULTIPART_FORM_DATA).header("X-User-Id", room.getUserA().getId()).param("nickname", "지민"))
 				.andExpect(status().isOk()).andExpect(jsonPath("$.nickname").value("지민"))
 				.andExpect(jsonPath("$.profileImageUrl").isEmpty());
+	}
+
+	@Test
+	void claimWithImageStoresSecureUrlAndReturnsItToPartner() throws Exception {
+		ChatRoom room = createInviteRoom();
+		User partner = saveUser(null, null);
+		room.assignUserB(partner);
+		chatRoomRepository.saveAndFlush(room);
+		mockMvc.perform(multipart("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.header("X-User-Id", room.getUserA().getId()).param("nickname", "지민")
+				.file(imageFile("image-data".getBytes())).contentType(MediaType.MULTIPART_FORM_DATA)
+				.characterEncoding("UTF-8"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.profileImageUrl").value("https://example.test/profiles/image-1"));
+		org.junit.jupiter.api.Assertions.assertEquals(1, profileImageStorage.uploadCount);
+
+		mockMvc.perform(get("/api/chat-rooms/{chatRoomId}", room.getId())
+				.header("X-User-Id", partner.getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.partner.profileImageUrl").value("https://example.test/profiles/image-1"));
+	}
+
+	@Test
+	void claimWithoutImageDoesNotCallStorage() throws Exception {
+		ChatRoom room = createInviteRoom();
+		mockMvc.perform(post("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.contentType(MediaType.MULTIPART_FORM_DATA).header("X-User-Id", room.getUserA().getId()).param("nickname", "지민"))
+				.andExpect(status().isOk()).andExpect(jsonPath("$.profileImageUrl").isEmpty());
+		org.junit.jupiter.api.Assertions.assertEquals(0, profileImageStorage.uploadCount);
+	}
+
+	@Test
+	void invalidProfileImagesAreRejectedBeforeStorage() throws Exception {
+		ChatRoom room = createInviteRoom();
+		mockMvc.perform(multipart("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.header("X-User-Id", room.getUserA().getId()).param("nickname", "지민")
+				.file(imageFile(new byte[0])))
+				.andExpect(status().isBadRequest());
+		mockMvc.perform(multipart("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.header("X-User-Id", room.getUserA().getId()).param("nickname", "지민")
+				.file(new MockMultipartFile("profileImage", "note.txt", MediaType.TEXT_PLAIN_VALUE, "not-an-image".getBytes())))
+				.andExpect(status().isBadRequest());
+		mockMvc.perform(multipart("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.header("X-User-Id", room.getUserA().getId()).param("nickname", "지민")
+				.file(imageFile(new byte[5 * 1024 * 1024 + 1])))
+				.andExpect(status().isBadRequest());
+		org.junit.jupiter.api.Assertions.assertEquals(0, profileImageStorage.uploadCount);
+	}
+
+	@Test
+	void unauthorizedOrAlreadyClaimedParticipantDoesNotUploadImage() throws Exception {
+		ChatRoom room = createInviteRoom();
+		User outsider = saveUser(null, null);
+		mockMvc.perform(multipart("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.header("X-User-Id", outsider.getId()).param("nickname", "외부")
+				.file(imageFile("image".getBytes())))
+				.andExpect(status().isForbidden());
+		mockMvc.perform(post("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.contentType(MediaType.MULTIPART_FORM_DATA).header("X-User-Id", room.getUserA().getId()).param("nickname", "지민"))
+				.andExpect(status().isOk());
+		mockMvc.perform(multipart("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.header("X-User-Id", room.getUserA().getId()).param("nickname", "재등록")
+				.file(imageFile("image".getBytes())))
+				.andExpect(status().isConflict());
+		org.junit.jupiter.api.Assertions.assertEquals(0, profileImageStorage.uploadCount);
+	}
+
+	@Test
+	void uploadFailureDoesNotClaimNickname() throws Exception {
+		ChatRoom room = createInviteRoom();
+		profileImageStorage.failUpload = true;
+		mockMvc.perform(multipart("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.header("X-User-Id", room.getUserA().getId()).param("nickname", "지민")
+				.file(imageFile("image".getBytes())))
+				.andExpect(status().isBadGateway());
+		org.junit.jupiter.api.Assertions.assertNull(userRepository.findById(room.getUserA().getId()).orElseThrow().getNickname());
+	}
+
+	@Test
+	void databaseCommitFailureDeletesUploadedImage() {
+		DataIntegrityViolationException databaseFailure = new DataIntegrityViolationException("commit failed");
+		ChatService failingService = claimServiceWhoseCommitFails(databaseFailure);
+
+		RuntimeException thrown = assertThrows(RuntimeException.class,
+				() -> failingService.claimNickname(1L, 1L, "지민", imageFile("image".getBytes())));
+
+		assertSame(databaseFailure, thrown);
+		assertEquals(1, profileImageStorage.deleteCount);
+		assertEquals("profiles/image-1", profileImageStorage.deletedPublicId);
+	}
+
+	@Test
+	void compensationDeleteFailureDoesNotReplaceDatabaseFailure() {
+		DataIntegrityViolationException databaseFailure = new DataIntegrityViolationException("commit failed");
+		profileImageStorage.failDelete = true;
+		ChatService failingService = claimServiceWhoseCommitFails(databaseFailure);
+
+		RuntimeException thrown = assertThrows(RuntimeException.class,
+				() -> failingService.claimNickname(1L, 1L, "지민", imageFile("image".getBytes())));
+
+		assertSame(databaseFailure, thrown);
+		assertEquals(1, profileImageStorage.deleteCount);
+		assertEquals("profiles/image-1", profileImageStorage.deletedPublicId);
+	}
+
+	@Test
+	void maxUploadSizeExceptionMapsToBadRequest() throws Exception {
+		ChatRoom room = createInviteRoom();
+		profileImageStorage.failMaxUpload = true;
+		mockMvc.perform(multipart("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.file(imageFile("image".getBytes()))
+				.header("X-User-Id", room.getUserA().getId())
+				.param("nickname", "지민"))
+				.andExpect(status().isBadRequest());
 	}
 
 	@Test
@@ -335,6 +479,12 @@ class ChatApiTests {
 				.andExpect(jsonPath("$.paths['/api/chat-rooms'].post.summary").value("초대 코드 채팅방 생성"))
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/join'].post.responses['404']").exists())
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/{chatRoomId}/participants/claim'].post.responses['409']").exists())
+				.andExpect(jsonPath("$.paths['/api/chat-rooms/{chatRoomId}/participants/claim'].post.requestBody.content['multipart/form-data']").exists())
+				.andExpect(jsonPath("$.paths['/api/chat-rooms/{chatRoomId}/participants/claim'].post.requestBody.content['multipart/form-data'].schema['$ref']").value("#/components/schemas/ParticipantClaimRequest"))
+				.andExpect(jsonPath("$.components.schemas.ParticipantClaimRequest.required", hasItem("nickname")))
+				.andExpect(jsonPath("$.components.schemas.ParticipantClaimRequest.required", org.hamcrest.Matchers.not(hasItem("profileImage"))))
+				.andExpect(jsonPath("$.components.schemas.ParticipantClaimRequest.properties.profileImage.type").value("string"))
+				.andExpect(jsonPath("$.components.schemas.ParticipantClaimRequest.properties.profileImage.format").value("binary"))
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/{chatRoomId}'].get.summary").value("채팅방 조회"))
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/{chatRoomId}/messages'].post.requestBody.required")
 						.value(true))
@@ -409,6 +559,28 @@ class ChatApiTests {
 				""".formatted(clientMessageId, content, sentAt);
 	}
 
+	private MockMultipartFile imageFile(byte[] content) {
+		return new MockMultipartFile("profileImage", "image.png", MediaType.IMAGE_PNG_VALUE, content);
+	}
+
+	private ChatService claimServiceWhoseCommitFails(RuntimeException databaseFailure) {
+		User user = mock(User.class);
+		when(user.getId()).thenReturn(1L);
+		when(user.getNickname()).thenReturn(null);
+		ChatRoom room = mock(ChatRoom.class);
+		when(room.getUserA()).thenReturn(user);
+		when(room.getUserB()).thenReturn(null);
+		UserRepository users = mock(UserRepository.class);
+		when(users.findById(1L)).thenReturn(java.util.Optional.of(user));
+		ChatRoomRepository rooms = mock(ChatRoomRepository.class);
+		when(rooms.findWithUsersByIdForUpdate(1L)).thenReturn(java.util.Optional.of(room));
+		PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
+		when(transactionManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
+		doThrow(databaseFailure).when(transactionManager).commit(any());
+		return new ChatService(users, rooms, mock(MessageRepository.class), transactionManager,
+				mock(ApplicationEventPublisher.class), profileImageStorage);
+	}
+
 	private OffsetDateTime time(int minute) {
 		return OffsetDateTime.of(2026, 8, 18, 12, 0, 0, 0, ZoneOffset.ofHours(9)).plusMinutes(minute);
 	}
@@ -417,5 +589,48 @@ class ChatApiTests {
 	}
 
 	private record JoinAttempt(int status) {
+	}
+
+	@TestConfiguration
+	static class ProfileImageStorageTestConfig {
+		@Bean
+		@Primary
+		FakeProfileImageStorage fakeProfileImageStorage() {
+			return new FakeProfileImageStorage();
+		}
+	}
+
+	static class FakeProfileImageStorage implements ProfileImageStorage {
+		private int uploadCount;
+		private int deleteCount;
+		private String deletedPublicId;
+		private boolean failUpload;
+		private boolean failDelete;
+		private boolean failMaxUpload;
+
+		@Override
+		public UploadedProfileImage upload(org.springframework.web.multipart.MultipartFile file) {
+			uploadCount++;
+			if (failMaxUpload) throw new org.springframework.web.multipart.MaxUploadSizeExceededException(5L * 1024 * 1024);
+			if (failUpload) throw new ProfileImageStorageException("fake failure");
+			return new UploadedProfileImage("profiles/image-" + uploadCount,
+					"https://example.test/profiles/image-" + uploadCount);
+		}
+
+		@Override
+		public void delete(String publicId) {
+			deleteCount++;
+			deletedPublicId = publicId;
+			if (failDelete) throw new ProfileImageStorageException("fake delete failure");
+		}
+
+		void reset() {
+			uploadCount = 0;
+			deleteCount = 0;
+			deletedPublicId = null;
+			failUpload = false;
+			failDelete = false;
+			failMaxUpload = false;
+		}
 	}
 }

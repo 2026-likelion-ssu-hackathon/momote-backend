@@ -19,5 +19,10 @@ public interface ChatRoomRepository extends JpaRepository<ChatRoom, Long> {
 
 	@Lock(LockModeType.PESSIMISTIC_WRITE)
 	@EntityGraph(attributePaths = {"userA", "userB"})
+	@Query("select chatRoom from ChatRoom chatRoom where chatRoom.id = :chatRoomId")
+	Optional<ChatRoom> findWithUsersByIdForUpdate(@Param("chatRoomId") Long chatRoomId);
+
+	@Lock(LockModeType.PESSIMISTIC_WRITE)
+	@EntityGraph(attributePaths = {"userA", "userB"})
 	Optional<ChatRoom> findWithUsersByInviteCode(String inviteCode);
 }

@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.multipart.MultipartFile;
 
 import com.suspiciouslions.backend.domain.chat.dto.ChatRoomResponse;
 import com.suspiciouslions.backend.domain.chat.dto.MessageResponse;
@@ -21,6 +22,7 @@ import com.suspiciouslions.backend.domain.chat.dto.CreateChatRoomResponse;
 import com.suspiciouslions.backend.domain.chat.dto.JoinChatRoomRequest;
 import com.suspiciouslions.backend.domain.chat.dto.JoinChatRoomResponse;
 import com.suspiciouslions.backend.domain.chat.dto.ParticipantClaimResponse;
+import com.suspiciouslions.backend.domain.chat.dto.ParticipantClaimRequest;
 import com.suspiciouslions.backend.domain.chat.service.ChatService;
 
 import io.swagger.v3.oas.annotations.Operation;
@@ -90,19 +92,27 @@ public class ChatController {
 		return chatService.joinChatRoom(request.inviteCode());
 	}
 
-	@Operation(summary = "참가자 닉네임 등록", description = "해당 방의 아직 등록하지 않은 참가자 닉네임을 등록합니다. 프로필 파일은 처리하지 않습니다.", tags = "Chat Rooms")
+	@Operation(summary = "참가자 닉네임 및 프로필 이미지 등록",
+			description = "nickname은 필수이고 profileImage는 선택입니다. 이미지는 image/*, 최대 5MB이며 Cloudinary profiles 폴더에 저장됩니다.",
+			tags = "Chat Rooms",
+			requestBody = @io.swagger.v3.oas.annotations.parameters.RequestBody(required = true,
+					content = @Content(mediaType = MediaType.MULTIPART_FORM_DATA_VALUE,
+							schema = @Schema(implementation = ParticipantClaimRequest.class))))
 	@ApiResponses({
 			@ApiResponse(responseCode = "200", description = "등록 성공"),
 			@ApiResponse(responseCode = "403", description = "다른 방의 사용자", content = @Content),
 			@ApiResponse(responseCode = "404", description = "사용자 또는 채팅방을 찾을 수 없음", content = @Content),
-			@ApiResponse(responseCode = "409", description = "이미 등록했거나 두 참가자 모두 등록됨", content = @Content)
+			@ApiResponse(responseCode = "409", description = "이미 등록했거나 두 참가자 모두 등록됨", content = @Content),
+			@ApiResponse(responseCode = "502", description = "프로필 이미지 외부 업로드 실패", content = @Content)
 	})
 	@PostMapping(path = "/{chatRoomId}/participants/claim", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
 	public ParticipantClaimResponse claimNickname(
 			@PathVariable @Positive Long chatRoomId,
 			@RequestHeader("X-User-Id") @Positive Long userId,
-			@RequestParam @NotBlank String nickname) {
-		return chatService.claimNickname(chatRoomId, userId, nickname);
+			@Parameter(hidden = true) @RequestParam @NotBlank String nickname,
+			@Parameter(hidden = true)
+		@RequestParam(required = false) MultipartFile profileImage) {
+		return chatService.claimNickname(chatRoomId, userId, nickname, profileImage);
 	}
 
 	@Operation(summary = "채팅방 조회", description = "참여 중인 채팅방과 상대방 정보를 조회합니다.", tags = "Chat Rooms")
