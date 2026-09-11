@@ -80,4 +80,10 @@ public class User {
 		this.nickname = nickname;
 		this.updatedAt = updatedAt;
 	}
+
+	public void claimProfile(String nickname, String profileImageUrl, OffsetDateTime updatedAt) {
+		this.nickname = nickname;
+		this.profileImageUrl = profileImageUrl;
+		this.updatedAt = updatedAt;
+	}
 }

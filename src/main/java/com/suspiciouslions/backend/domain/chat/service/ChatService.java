@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 import java.security.SecureRandom;
 import java.time.OffsetDateTime;
 
@@ -16,6 +17,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.multipart.MultipartFile;
 
 import com.suspiciouslions.backend.domain.ai.event.MessageCreatedEvent;
 import com.suspiciouslions.backend.domain.chat.dto.ChatRoomResponse;
@@ -32,6 +34,9 @@ import com.suspiciouslions.backend.domain.chat.repository.ChatRoomRepository;
 import com.suspiciouslions.backend.domain.chat.repository.MessageRepository;
 import com.suspiciouslions.backend.domain.user.entity.User;
 import com.suspiciouslions.backend.domain.user.repository.UserRepository;
+import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage;
+import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage.UploadedProfileImage;
+import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorageException;
 
 @Service
 public class ChatService {
@@ -43,15 +48,17 @@ public class ChatService {
 	private final MessageRepository messageRepository;
 	private final TransactionTemplate transactionTemplate;
 	private final ApplicationEventPublisher eventPublisher;
+	private final ProfileImageStorage profileImageStorage;
 
 	public ChatService(UserRepository userRepository, ChatRoomRepository chatRoomRepository,
 			MessageRepository messageRepository, PlatformTransactionManager transactionManager,
-			ApplicationEventPublisher eventPublisher) {
+			ApplicationEventPublisher eventPublisher, ProfileImageStorage profileImageStorage) {
 		this.userRepository = userRepository;
 		this.chatRoomRepository = chatRoomRepository;
 		this.messageRepository = messageRepository;
 		this.transactionTemplate = new TransactionTemplate(transactionManager);
 		this.eventPublisher = eventPublisher;
+		this.profileImageStorage = profileImageStorage;
 	}
 
 	public CreateChatRoomResponse createChatRoom() {
@@ -85,19 +92,37 @@ public class ChatService {
 		return new JoinChatRoomResponse(room.getId(), user.getId());
 	}
 
-	@Transactional
-	public ParticipantClaimResponse claimNickname(Long chatRoomId, Long userId, String nickname) {
-		User user = findUser(userId);
-		ChatRoom room = findChatRoom(chatRoomId);
-		validateParticipant(room, userId);
-		if (user.getNickname() != null) {
-			throw new ResponseStatusException(HttpStatus.CONFLICT, "Nickname is already registered");
+	public ParticipantClaimResponse claimNickname(Long chatRoomId, Long userId, String nickname, MultipartFile profileImage) {
+		validateProfileImage(profileImage);
+		AtomicReference<UploadedProfileImage> uploaded = new AtomicReference<>();
+		try {
+			ParticipantClaimResponse response = transactionTemplate.execute(status -> {
+				User user = findUser(userId);
+				ChatRoom room = chatRoomRepository.findWithUsersByIdForUpdate(chatRoomId)
+						.orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Chat room not found"));
+				validateClaimableParticipant(room, userId);
+				UploadedProfileImage image = profileImage == null ? null : profileImageStorage.upload(profileImage);
+				uploaded.set(image);
+				String profileImageUrl = image == null ? null : image.secureUrl();
+				user.claimProfile(nickname, profileImageUrl, OffsetDateTime.now());
+				return new ParticipantClaimResponse(user.getId(), user.getNickname(), user.getProfileImageUrl());
+			});
+			return Objects.requireNonNull(response);
+		} catch (ProfileImageStorageException exception) {
+			throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Profile image upload failed");
+		} catch (RuntimeException exception) {
+			compensateUploadedImage(uploaded.get());
+			throw exception;
 		}
-		if (room.getUserA().getNickname() != null && room.getUserB() != null && room.getUserB().getNickname() != null) {
-			throw new ResponseStatusException(HttpStatus.CONFLICT, "Both participants already registered nicknames");
+	}
+
+	private void compensateUploadedImage(UploadedProfileImage uploaded) {
+		if (uploaded == null) return;
+		try {
+			profileImageStorage.delete(uploaded.publicId());
+		} catch (RuntimeException ignored) {
+			// The original database/commit exception is the primary failure.
 		}
-		user.claimNickname(nickname, OffsetDateTime.now());
-		return new ParticipantClaimResponse(user.getId(), user.getNickname(), user.getProfileImageUrl());
 	}
 
 	@Transactional(readOnly = true)
@@ -207,6 +232,28 @@ public class ChatService {
 		if (!Objects.equals(chatRoom.getUserA().getId(), userId)
 				&& (chatRoom.getUserB() == null || !Objects.equals(chatRoom.getUserB().getId(), userId))) {
 			throw new ResponseStatusException(HttpStatus.FORBIDDEN, "User is not a chat room participant");
+		}
+	}
+
+	private void validateClaimableParticipant(ChatRoom room, Long userId) {
+		validateParticipant(room, userId);
+		User user = Objects.equals(room.getUserA().getId(), userId) ? room.getUserA() : room.getUserB();
+		if (user.getNickname() != null) {
+			throw new ResponseStatusException(HttpStatus.CONFLICT, "Nickname is already registered");
+		}
+		if (room.getUserA().getNickname() != null && room.getUserB() != null && room.getUserB().getNickname() != null) {
+			throw new ResponseStatusException(HttpStatus.CONFLICT, "Both participants already registered nicknames");
+		}
+	}
+
+	private void validateProfileImage(MultipartFile profileImage) {
+		if (profileImage == null) return;
+		if (profileImage.isEmpty() || profileImage.getSize() > 5L * 1024 * 1024) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Profile image must be non-empty and at most 5MB");
+		}
+		String contentType = profileImage.getContentType();
+		if (contentType == null || !contentType.startsWith("image/")) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Profile image must have an image content type");
 		}
 	}
 
