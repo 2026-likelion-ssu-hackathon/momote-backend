@@ -5,6 +5,11 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,6 +18,7 @@ import org.springframework.boot.testcontainers.service.connection.ServiceConnect
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -23,6 +29,8 @@ import com.suspiciouslions.backend.domain.chat.entity.Message;
 import com.suspiciouslions.backend.domain.chat.entity.RoomStatus;
 import com.suspiciouslions.backend.domain.chat.repository.ChatRoomRepository;
 import com.suspiciouslions.backend.domain.chat.repository.MessageRepository;
+import com.suspiciouslions.backend.domain.chat.service.ChatService;
+import com.suspiciouslions.backend.domain.chat.dto.CreateChatRoomResponse;
 import com.suspiciouslions.backend.domain.user.entity.User;
 import com.suspiciouslions.backend.domain.user.repository.UserRepository;
 
@@ -54,6 +62,9 @@ class ChatApiTests {
 	@Autowired
 	private MessageRepository messageRepository;
 
+	@Autowired
+	private ChatService chatService;
+
 	@Test
 	void participantGetsChatRoomAndPartner() throws Exception {
 		TestContext context = createTestContext();
@@ -77,6 +88,120 @@ class ChatApiTests {
 		mockMvc.perform(get("/api/chat-rooms/{chatRoomId}", context.chatRoom().getId())
 					.header("X-User-Id", outsider.getId()))
 				.andExpect(status().isForbidden());
+	}
+
+	@Test
+	void createsInviteRoomWithOneTemporaryParticipantAndCanBeClaimed() throws Exception {
+		String response = mockMvc.perform(post("/api/chat-rooms"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.roomId").isNumber())
+				.andExpect(jsonPath("$.userId").isNumber())
+				.andExpect(jsonPath("$.inviteCode").value(org.hamcrest.Matchers.matchesPattern("[A-Z0-9]{6}")))
+				.andReturn().getResponse().getContentAsString();
+		ChatRoom room = chatRoomRepository.findAll().stream()
+				.filter(candidate -> response.contains("\"roomId\":" + candidate.getId()))
+				.findFirst().orElseThrow();
+
+		mockMvc.perform(get("/api/chat-rooms/{chatRoomId}", room.getId()).header("X-User-Id", room.getUserA().getId()))
+				.andExpect(status().isOk()).andExpect(jsonPath("$.partner").doesNotExist());
+		mockMvc.perform(post("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.contentType(MediaType.MULTIPART_FORM_DATA).header("X-User-Id", room.getUserA().getId()).param("nickname", "지민"))
+				.andExpect(status().isOk()).andExpect(jsonPath("$.nickname").value("지민"))
+				.andExpect(jsonPath("$.profileImageUrl").isEmpty());
+	}
+
+	@Test
+	void inviteCodeJoinsOnlyOneSecondParticipant() throws Exception {
+		ChatRoom room = createInviteRoom();
+		mockMvc.perform(post("/api/chat-rooms/join").contentType(MediaType.APPLICATION_JSON)
+				.content("{\"inviteCode\":\"" + room.getInviteCode() + "\"}"))
+				.andExpect(status().isOk()).andExpect(jsonPath("$.roomId").value(room.getId()));
+		mockMvc.perform(post("/api/chat-rooms/join").contentType(MediaType.APPLICATION_JSON)
+				.content("{\"inviteCode\":\"" + room.getInviteCode() + "\"}"))
+				.andExpect(status().isConflict());
+		mockMvc.perform(post("/api/chat-rooms/join").contentType(MediaType.APPLICATION_JSON)
+				.content("{\"inviteCode\":\"NOPE00\"}"))
+				.andExpect(status().isNotFound());
+	}
+
+	@Test
+	void inviteCodeIsUniqueInDatabase() {
+		ChatRoom first = createInviteRoom();
+		User otherUser = saveUser(null, null);
+		ChatRoom duplicate = new ChatRoom(otherUser, null, null, RoomStatus.ACTIVE, time(0), null);
+		duplicate.assignInviteCode(first.getInviteCode());
+		org.junit.jupiter.api.Assertions.assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
+				() -> chatRoomRepository.saveAndFlush(duplicate));
+	}
+
+	@Test
+	void participantClaimRejectsOtherRoomsUserAndDuplicateClaim() throws Exception {
+		ChatRoom room = createInviteRoom();
+		User otherRoomUser = saveUser(null, null);
+		mockMvc.perform(post("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.contentType(MediaType.MULTIPART_FORM_DATA).header("X-User-Id", otherRoomUser.getId()).param("nickname", "외부"))
+				.andExpect(status().isForbidden());
+		mockMvc.perform(post("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.contentType(MediaType.MULTIPART_FORM_DATA).header("X-User-Id", room.getUserA().getId()).param("nickname", "지민"))
+				.andExpect(status().isOk());
+		mockMvc.perform(post("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.contentType(MediaType.MULTIPART_FORM_DATA).header("X-User-Id", room.getUserA().getId()).param("nickname", "지민2"))
+				.andExpect(status().isConflict());
+	}
+
+	@Test
+	@Transactional(propagation = Propagation.NOT_SUPPORTED)
+	void concurrentJoinsDoNotExceedTwoParticipants() throws Exception {
+		CreateChatRoomResponse created = chatService.createChatRoom();
+		ExecutorService executor = Executors.newFixedThreadPool(2);
+		CountDownLatch ready = new CountDownLatch(2);
+		CountDownLatch start = new CountDownLatch(1);
+		try {
+			CompletableFuture<JoinAttempt> first = CompletableFuture.supplyAsync(
+					() -> tryJoin(created.inviteCode(), ready, start), executor);
+			CompletableFuture<JoinAttempt> second = CompletableFuture.supplyAsync(
+					() -> tryJoin(created.inviteCode(), ready, start), executor);
+			org.junit.jupiter.api.Assertions.assertTrue(ready.await(5, TimeUnit.SECONDS));
+			start.countDown();
+			List<Integer> statuses = List.of(first.get().status(), second.get().status()).stream().sorted().toList();
+			org.junit.jupiter.api.Assertions.assertEquals(List.of(200, 409), statuses);
+			ChatRoom room = chatRoomRepository.findWithUsersById(created.roomId()).orElseThrow();
+			org.junit.jupiter.api.Assertions.assertNotNull(room.getUserB());
+		} finally {
+			executor.shutdownNow();
+			executor.awaitTermination(5, TimeUnit.SECONDS);
+			chatRoomRepository.findWithUsersById(created.roomId()).ifPresent(room -> {
+				Long secondUserId = room.getUserB() == null ? null : room.getUserB().getId();
+				chatRoomRepository.delete(room);
+				userRepository.deleteById(created.userId());
+				if (secondUserId != null) userRepository.deleteById(secondUserId);
+			});
+		}
+	}
+
+	@Test
+	void oneParticipantRoomRejectsMessageAndSafelyReturnsEmptyAiAndEmotionResults() throws Exception {
+		ChatRoom room = createInviteRoom();
+		Long userId = room.getUserA().getId();
+		mockMvc.perform(post("/api/chat-rooms/{chatRoomId}/messages", room.getId())
+				.header("X-User-Id", userId).contentType(MediaType.APPLICATION_JSON)
+				.content(messageRequest("waiting-room", "안녕하세요", time(1))))
+				.andExpect(status().isConflict());
+		mockMvc.perform(get("/api/chat-rooms/{chatRoomId}/ai-results", room.getId()).header("X-User-Id", userId))
+				.andExpect(status().isOk()).andExpect(jsonPath("$").isEmpty());
+		mockMvc.perform(get("/api/chat-rooms/{chatRoomId}/emotion-analyses", room.getId()).header("X-User-Id", userId))
+				.andExpect(status().isOk()).andExpect(jsonPath("$").isEmpty());
+	}
+
+	@Test
+	void nicknameClaimRejectsMissingOrBlankNickname() throws Exception {
+		ChatRoom room = createInviteRoom();
+		mockMvc.perform(post("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.contentType(MediaType.MULTIPART_FORM_DATA).header("X-User-Id", room.getUserA().getId()))
+				.andExpect(status().isBadRequest());
+		mockMvc.perform(post("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.contentType(MediaType.MULTIPART_FORM_DATA).header("X-User-Id", room.getUserA().getId()).param("nickname", "   "))
+				.andExpect(status().isBadRequest());
 	}
 
 	@Test
@@ -207,6 +332,9 @@ class ChatApiTests {
 	void chatEndpointsAreDocumentedInOpenApi() throws Exception {
 		mockMvc.perform(get("/v3/api-docs"))
 				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.paths['/api/chat-rooms'].post.summary").value("초대 코드 채팅방 생성"))
+				.andExpect(jsonPath("$.paths['/api/chat-rooms/join'].post.responses['404']").exists())
+				.andExpect(jsonPath("$.paths['/api/chat-rooms/{chatRoomId}/participants/claim'].post.responses['409']").exists())
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/{chatRoomId}'].get.summary").value("채팅방 조회"))
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/{chatRoomId}/messages'].post.requestBody.required")
 						.value(true))
@@ -230,6 +358,27 @@ class ChatApiTests {
 				null
 		));
 		return new TestContext(userA, userB, chatRoom);
+	}
+
+	private ChatRoom createInviteRoom() {
+		User user = saveUser(null, null);
+		ChatRoom room = new ChatRoom(user, null, null, RoomStatus.ACTIVE, time(0), null);
+		room.assignInviteCode("INVITE1");
+		return chatRoomRepository.saveAndFlush(room);
+	}
+
+	private JoinAttempt tryJoin(String inviteCode, CountDownLatch ready, CountDownLatch start) {
+		try {
+			ready.countDown();
+			if (!start.await(5, TimeUnit.SECONDS)) throw new IllegalStateException("Concurrent join did not start");
+			chatService.joinChatRoom(inviteCode);
+			return new JoinAttempt(200);
+		} catch (org.springframework.web.server.ResponseStatusException exception) {
+			return new JoinAttempt(exception.getStatusCode().value());
+		} catch (InterruptedException exception) {
+			Thread.currentThread().interrupt();
+			throw new IllegalStateException(exception);
+		}
 	}
 
 	private User saveUser(String nickname, String profileImageUrl) {
@@ -265,5 +414,8 @@ class ChatApiTests {
 	}
 
 	private record TestContext(User userA, User userB, ChatRoom chatRoom) {
+	}
+
+	private record JoinAttempt(int status) {
 	}
 }
