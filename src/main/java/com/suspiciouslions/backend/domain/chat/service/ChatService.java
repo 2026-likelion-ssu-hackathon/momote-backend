@@ -37,6 +37,7 @@ import com.suspiciouslions.backend.domain.user.repository.UserRepository;
 import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage;
 import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage.UploadedProfileImage;
 import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorageException;
+import com.suspiciouslions.backend.domain.user.storage.ProfileImageValidation;
 
 @Service
 public class ChatService {
@@ -93,7 +94,7 @@ public class ChatService {
 	}
 
 	public ParticipantClaimResponse claimNickname(Long chatRoomId, Long userId, String nickname, MultipartFile profileImage) {
-		validateProfileImage(profileImage);
+		ProfileImageValidation.validate(profileImage);
 		AtomicReference<UploadedProfileImage> uploaded = new AtomicReference<>();
 		try {
 			ParticipantClaimResponse response = transactionTemplate.execute(status -> {
@@ -243,17 +244,6 @@ public class ChatService {
 		}
 		if (room.getUserA().getNickname() != null && room.getUserB() != null && room.getUserB().getNickname() != null) {
 			throw new ResponseStatusException(HttpStatus.CONFLICT, "Both participants already registered nicknames");
-		}
-	}
-
-	private void validateProfileImage(MultipartFile profileImage) {
-		if (profileImage == null) return;
-		if (profileImage.isEmpty() || profileImage.getSize() > 5L * 1024 * 1024) {
-			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Profile image must be non-empty and at most 5MB");
-		}
-		String contentType = profileImage.getContentType();
-		if (contentType == null || !contentType.startsWith("image/")) {
-			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Profile image must have an image content type");
 		}
 	}
 
