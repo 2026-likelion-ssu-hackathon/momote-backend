@@ -2,6 +2,14 @@ package com.suspiciouslions.backend.domain.chat;
 
 import java.time.OffsetDateTime;
 import java.util.Optional;
+import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -16,9 +24,11 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.support.SimpleTransactionStatus;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -68,6 +78,8 @@ class JoinRequestApiTests {
 	@Autowired private ChatRoomRepository chatRoomRepository;
 	@Autowired private ChatRoomJoinRequestRepository joinRequestRepository;
 	@Autowired private FakeStorage storage;
+	@Autowired private JoinRequestService joinRequestService;
+	@Autowired private JdbcTemplate jdbcTemplate;
 
 	@BeforeEach
 	void resetStorage() {
@@ -212,7 +224,205 @@ class JoinRequestApiTests {
 				.andExpect(jsonPath("$.components.schemas.CreateJoinRequestDocument.properties.profileImage.type").value("string"))
 				.andExpect(jsonPath("$.components.schemas.CreateJoinRequestDocument.properties.profileImage.format").value("binary"))
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/join-requests/{requestId}'].get.responses['200'].content['*/*'].schema['$ref']")
-						.value("#/components/schemas/JoinRequestStatusResponse"));
+						.value("#/components/schemas/JoinRequestStatusResponse"))
+				.andExpect(jsonPath("$.paths['/api/chat-rooms/{roomId}/join-requests'].get.parameters[?(@.name == 'status')].schema.default")
+						.value(hasItem("PENDING")))
+				.andExpect(jsonPath("$.paths['/api/chat-rooms/{roomId}/join-requests'].get.parameters[*].name")
+						.value(hasItem("X-User-Id")))
+				.andExpect(jsonPath("$.paths['/api/chat-rooms/{roomId}/join-requests'].get.responses['403']").exists())
+				.andExpect(jsonPath("$.paths['/api/chat-rooms/{roomId}/join-requests/{requestId}/accept'].post.responses['409']").exists())
+				.andExpect(jsonPath("$.paths['/api/chat-rooms/{roomId}/join-requests/{requestId}/reject'].post.responses['404']").exists())
+				.andExpect(jsonPath("$.components.schemas.JoinRequestListItemResponse.properties.requestId").exists())
+				.andExpect(jsonPath("$.components.schemas.JoinRequestListItemResponse.properties.requestedAt.format").value("date-time"));
+	}
+
+	@Test
+	void ownerListsPendingRequestsOldestFirstAndNonOwnerIsForbidden() throws Exception {
+		ChatRoom room = createOpenRoom("LIST01");
+		mockMvc.perform(get("/api/chat-rooms/{roomId}/join-requests", room.getId())
+				.header("X-User-Id", room.getUserA().getId()))
+				.andExpect(status().isOk()).andExpect(jsonPath("$").isEmpty());
+		ChatRoomJoinRequest later = saveRequest(room, "나중", null, null, OffsetDateTime.now().plusMinutes(1));
+		ChatRoomJoinRequest rejected = saveRequest(room, "거절", null, null, OffsetDateTime.now());
+		rejected.reject();
+		joinRequestRepository.saveAndFlush(rejected);
+		ChatRoomJoinRequest earlier = saveRequest(room, "먼저", null, null, OffsetDateTime.now().minusMinutes(1));
+
+		mockMvc.perform(get("/api/chat-rooms/{roomId}/join-requests", room.getId())
+				.header("X-User-Id", room.getUserA().getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.length()").value(2))
+				.andExpect(jsonPath("$[0].requestId").value(earlier.getId()))
+				.andExpect(jsonPath("$[0].profileImageUrl").isEmpty())
+				.andExpect(jsonPath("$[1].requestId").value(later.getId()));
+		mockMvc.perform(get("/api/chat-rooms/{roomId}/join-requests", room.getId())
+				.header("X-User-Id", room.getUserA().getId()).param("status", "REJECTED"))
+				.andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1))
+				.andExpect(jsonPath("$[0].requestId").value(rejected.getId()));
+		User outsider = userRepository.save(new User(null, null, "외부", null, OffsetDateTime.now(), OffsetDateTime.now()));
+		mockMvc.perform(get("/api/chat-rooms/{roomId}/join-requests", room.getId())
+				.header("X-User-Id", outsider.getId()))
+				.andExpect(status().isForbidden());
+		mockMvc.perform(get("/api/chat-rooms/{roomId}/join-requests", 999999L)
+				.header("X-User-Id", outsider.getId()))
+				.andExpect(status().isNotFound());
+	}
+
+	@Test
+	void ownerAcceptsRequestCreatesParticipantAndAutoRejectsOthers() throws Exception {
+		ChatRoom room = createOpenRoom("ACCEPT");
+		ChatRoomJoinRequest accepted = saveRequest(room, "지민", "https://example.test/jimin", "profiles/jimin", OffsetDateTime.now());
+		ChatRoomJoinRequest other = saveRequest(room, "민지", "https://example.test/minji", "profiles/minji", OffsetDateTime.now().plusSeconds(1));
+		ChatRoomJoinRequest another = saveRequest(room, "수진", "https://example.test/sujin", "profiles/sujin", OffsetDateTime.now().plusSeconds(2));
+		long userCount = userRepository.count();
+		storage.failDeletePublicId = "profiles/minji";
+
+		mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+				"/api/chat-rooms/{roomId}/join-requests/{requestId}/accept", room.getId(), accepted.getId())
+				.header("X-User-Id", room.getUserA().getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.requestId").value(accepted.getId()))
+				.andExpect(jsonPath("$.userId").isNumber())
+				.andExpect(jsonPath("$.status").value("ACCEPTED"));
+
+		ChatRoom foundRoom = chatRoomRepository.findWithUsersById(room.getId()).orElseThrow();
+		assertEquals(userCount + 1, userRepository.count());
+		assertEquals("지민", foundRoom.getUserB().getNickname());
+		assertEquals("https://example.test/jimin", foundRoom.getUserB().getProfileImageUrl());
+		ChatRoomJoinRequest foundAccepted = joinRequestRepository.findById(accepted.getId()).orElseThrow();
+		assertEquals(JoinRequestStatus.ACCEPTED, foundAccepted.getStatus());
+		assertEquals(foundRoom.getUserB().getId(), foundAccepted.getAssignedUser().getId());
+		assertEquals(JoinRequestStatus.REJECTED, joinRequestRepository.findById(other.getId()).orElseThrow().getStatus());
+		assertEquals(JoinRequestStatus.REJECTED, joinRequestRepository.findById(another.getId()).orElseThrow().getStatus());
+		assertEquals(List.of("profiles/minji", "profiles/sujin"), storage.deletedPublicIds);
+		assertEquals(0, storage.uploadCount);
+
+		mockMvc.perform(get("/api/chat-rooms/join-requests/{requestId}", accepted.getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("ACCEPTED"))
+				.andExpect(jsonPath("$.roomId").value(room.getId()))
+				.andExpect(jsonPath("$.userId").value(foundRoom.getUserB().getId()))
+				.andExpect(jsonPath("$.nickname").value("지민"))
+				.andExpect(jsonPath("$.profileImageUrl").value("https://example.test/jimin"));
+		mockMvc.perform(get("/api/chat-rooms/{chatRoomId}", room.getId())
+				.header("X-User-Id", foundRoom.getUserB().getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.partner.userId").value(room.getUserA().getId()));
+	}
+
+	@Test
+	void rejectCommitsBeforeImageCleanupAndAllowsAnotherRequest() throws Exception {
+		ChatRoom room = createOpenRoom("REJECT");
+		ChatRoomJoinRequest request = saveRequest(room, "지민", "https://example.test/jimin", "profiles/jimin", OffsetDateTime.now());
+		long userCount = userRepository.count();
+		storage.failDelete = true;
+
+		mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+				"/api/chat-rooms/{roomId}/join-requests/{requestId}/reject", room.getId(), request.getId())
+				.header("X-User-Id", room.getUserA().getId()))
+				.andExpect(status().isOk()).andExpect(jsonPath("$.status").value("REJECTED"));
+
+		assertEquals(JoinRequestStatus.REJECTED, joinRequestRepository.findById(request.getId()).orElseThrow().getStatus());
+		assertNull(chatRoomRepository.findWithUsersById(room.getId()).orElseThrow().getUserB());
+		assertEquals(userCount, userRepository.count());
+		assertEquals("REJECT", chatRoomRepository.findById(room.getId()).orElseThrow().getInviteCode());
+		assertEquals(List.of("profiles/jimin"), storage.deletedPublicIds);
+		ChatRoomJoinRequest noImage = saveRequest(room, "이미지없음", null, null, OffsetDateTime.now().plusSeconds(1));
+		mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+				"/api/chat-rooms/{roomId}/join-requests/{requestId}/reject", room.getId(), noImage.getId())
+				.header("X-User-Id", room.getUserA().getId())).andExpect(status().isOk());
+		assertEquals(List.of("profiles/jimin"), storage.deletedPublicIds);
+		mockMvc.perform(multipart("/api/chat-rooms/join-requests")
+				.param("inviteCode", "REJECT").param("nickname", "민지"))
+				.andExpect(status().isOk());
+	}
+
+	@Test
+	void processingRejectsWrongRoomNonOwnerProcessedRequestAndFullRoom() throws Exception {
+		ChatRoom room = createOpenRoom("CHECK1");
+		ChatRoom otherRoom = createOpenRoom("CHECK2");
+		ChatRoomJoinRequest request = saveRequest(room, "지민", null, null, OffsetDateTime.now());
+		User outsider = otherRoom.getUserA();
+		mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+				"/api/chat-rooms/{roomId}/join-requests/{requestId}/accept", room.getId(), request.getId())
+				.header("X-User-Id", outsider.getId())).andExpect(status().isForbidden());
+		mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+				"/api/chat-rooms/{roomId}/join-requests/{requestId}/accept", otherRoom.getId(), request.getId())
+				.header("X-User-Id", otherRoom.getUserA().getId())).andExpect(status().isNotFound());
+		mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+				"/api/chat-rooms/{roomId}/join-requests/{requestId}/reject", room.getId(), request.getId())
+				.header("X-User-Id", outsider.getId())).andExpect(status().isForbidden());
+		mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+				"/api/chat-rooms/{roomId}/join-requests/{requestId}/reject", otherRoom.getId(), request.getId())
+				.header("X-User-Id", otherRoom.getUserA().getId())).andExpect(status().isNotFound());
+		request.reject();
+		joinRequestRepository.saveAndFlush(request);
+		mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+				"/api/chat-rooms/{roomId}/join-requests/{requestId}/accept", room.getId(), request.getId())
+				.header("X-User-Id", room.getUserA().getId())).andExpect(status().isConflict());
+		mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+				"/api/chat-rooms/{roomId}/join-requests/{requestId}/reject", room.getId(), request.getId())
+				.header("X-User-Id", room.getUserA().getId())).andExpect(status().isConflict());
+		ChatRoomJoinRequest fullRequest = saveRequest(otherRoom, "민지", null, null, OffsetDateTime.now());
+		otherRoom.assignUserB(userRepository.save(new User(null, null, "참가자", null, OffsetDateTime.now(), OffsetDateTime.now())));
+		chatRoomRepository.saveAndFlush(otherRoom);
+		mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+				"/api/chat-rooms/{roomId}/join-requests/{requestId}/accept", otherRoom.getId(), fullRequest.getId())
+				.header("X-User-Id", otherRoom.getUserA().getId())).andExpect(status().isConflict());
+	}
+
+	@Test
+	@Transactional(propagation = Propagation.NOT_SUPPORTED)
+	void concurrentAcceptsOfDifferentRequestsAllowExactlyOne() throws Exception {
+		ChatRoom room = createOpenRoom("RACE01");
+		ChatRoomJoinRequest first = saveRequest(room, "첫째", null, null, OffsetDateTime.now());
+		ChatRoomJoinRequest second = saveRequest(room, "둘째", null, null, OffsetDateTime.now().plusSeconds(1));
+		try {
+			List<Integer> statuses = runConcurrently(
+					() -> joinRequestService.accept(room.getId(), first.getId(), room.getUserA().getId()),
+					() -> joinRequestService.accept(room.getId(), second.getId(), room.getUserA().getId()));
+			assertEquals(List.of(200, 409), statuses);
+			assertEquals(1, joinRequestRepository.findAll().stream()
+					.filter(request -> request.getStatus() == JoinRequestStatus.ACCEPTED).count());
+			assertEquals(1, joinRequestRepository.findAll().stream()
+					.filter(request -> request.getStatus() == JoinRequestStatus.REJECTED).count());
+		} finally {
+			deleteCommittedRoom(room.getId(), room.getUserA().getId());
+		}
+	}
+
+	@Test
+	@Transactional(propagation = Propagation.NOT_SUPPORTED)
+	void concurrentAcceptsOfSameRequestAllowExactlyOne() throws Exception {
+		ChatRoom room = createOpenRoom("RACE02");
+		ChatRoomJoinRequest request = saveRequest(room, "지민", null, null, OffsetDateTime.now());
+		try {
+			List<Integer> statuses = runConcurrently(
+					() -> joinRequestService.accept(room.getId(), request.getId(), room.getUserA().getId()),
+					() -> joinRequestService.accept(room.getId(), request.getId(), room.getUserA().getId()));
+			assertEquals(List.of(200, 409), statuses);
+			assertEquals(JoinRequestStatus.ACCEPTED, joinRequestRepository.findById(request.getId()).orElseThrow().getStatus());
+		} finally {
+			deleteCommittedRoom(room.getId(), room.getUserA().getId());
+		}
+	}
+
+	@Test
+	@Transactional(propagation = Propagation.NOT_SUPPORTED)
+	void concurrentAcceptAndRejectProduceOneFinalState() throws Exception {
+		ChatRoom room = createOpenRoom("RACE03");
+		ChatRoomJoinRequest request = saveRequest(room, "지민", null, null, OffsetDateTime.now());
+		try {
+			List<Integer> statuses = runConcurrently(
+					() -> joinRequestService.accept(room.getId(), request.getId(), room.getUserA().getId()),
+					() -> joinRequestService.reject(room.getId(), request.getId(), room.getUserA().getId()));
+			assertEquals(List.of(200, 409), statuses);
+			JoinRequestStatus finalStatus = joinRequestRepository.findById(request.getId()).orElseThrow().getStatus();
+			org.junit.jupiter.api.Assertions.assertTrue(
+					finalStatus == JoinRequestStatus.ACCEPTED || finalStatus == JoinRequestStatus.REJECTED);
+		} finally {
+			deleteCommittedRoom(room.getId(), room.getUserA().getId());
+		}
 	}
 
 	private ChatRoom createOpenRoom(String inviteCode) {
@@ -234,6 +444,12 @@ class JoinRequestApiTests {
 		return new MockMultipartFile("profileImage", "profile.png", MediaType.IMAGE_PNG_VALUE, content);
 	}
 
+	private ChatRoomJoinRequest saveRequest(ChatRoom room, String nickname, String imageUrl,
+			String publicId, OffsetDateTime requestedAt) {
+		return joinRequestRepository.saveAndFlush(
+				new ChatRoomJoinRequest(room, nickname, imageUrl, publicId, requestedAt));
+	}
+
 	private JoinRequestService serviceWhoseCommitFails(RuntimeException failure) {
 		ChatRoom room = mock(ChatRoom.class);
 		when(room.getId()).thenReturn(1L);
@@ -248,7 +464,48 @@ class JoinRequestApiTests {
 		PlatformTransactionManager transactionManager = mock(PlatformTransactionManager.class);
 		when(transactionManager.getTransaction(any())).thenReturn(new SimpleTransactionStatus());
 		doThrow(failure).when(transactionManager).commit(any());
-		return new JoinRequestService(rooms, requests, storage, transactionManager);
+		return new JoinRequestService(rooms, requests, mock(UserRepository.class), storage, transactionManager);
+	}
+
+	private List<Integer> runConcurrently(Supplier<?> firstAction, Supplier<?> secondAction) throws Exception {
+		ExecutorService executor = Executors.newFixedThreadPool(2);
+		CountDownLatch ready = new CountDownLatch(2);
+		CountDownLatch start = new CountDownLatch(1);
+		try {
+			CompletableFuture<Integer> first = CompletableFuture.supplyAsync(
+					() -> runProcessing(firstAction, ready, start), executor);
+			CompletableFuture<Integer> second = CompletableFuture.supplyAsync(
+					() -> runProcessing(secondAction, ready, start), executor);
+			org.junit.jupiter.api.Assertions.assertTrue(ready.await(5, TimeUnit.SECONDS));
+			start.countDown();
+			return List.of(first.get(), second.get()).stream().sorted().toList();
+		} finally {
+			executor.shutdownNow();
+			executor.awaitTermination(5, TimeUnit.SECONDS);
+		}
+	}
+
+	private int runProcessing(Supplier<?> action, CountDownLatch ready, CountDownLatch start) {
+		try {
+			ready.countDown();
+			if (!start.await(5, TimeUnit.SECONDS)) throw new IllegalStateException("Processing did not start");
+			action.get();
+			return 200;
+		} catch (org.springframework.web.server.ResponseStatusException exception) {
+			return exception.getStatusCode().value();
+		} catch (InterruptedException exception) {
+			Thread.currentThread().interrupt();
+			throw new IllegalStateException(exception);
+		}
+	}
+
+	private void deleteCommittedRoom(Long roomId, Long ownerId) {
+		Long participantId = jdbcTemplate.queryForObject(
+				"SELECT user_b_id FROM chat_rooms WHERE id = ?", Long.class, roomId);
+		jdbcTemplate.update("DELETE FROM chat_room_join_requests WHERE chat_room_id = ?", roomId);
+		jdbcTemplate.update("DELETE FROM chat_rooms WHERE id = ?", roomId);
+		if (participantId != null) jdbcTemplate.update("DELETE FROM users WHERE id = ?", participantId);
+		jdbcTemplate.update("DELETE FROM users WHERE id = ?", ownerId);
 	}
 
 	@TestConfiguration
@@ -264,8 +521,10 @@ class JoinRequestApiTests {
 		int uploadCount;
 		int deleteCount;
 		String deletedPublicId;
+		List<String> deletedPublicIds = new java.util.ArrayList<>();
 		boolean failUpload;
 		boolean failDelete;
+		String failDeletePublicId;
 
 		@Override
 		public UploadedProfileImage upload(org.springframework.web.multipart.MultipartFile file) {
@@ -279,15 +538,20 @@ class JoinRequestApiTests {
 		public void delete(String publicId) {
 			deleteCount++;
 			deletedPublicId = publicId;
-			if (failDelete) throw new ProfileImageStorageException("fake delete failure");
+			deletedPublicIds.add(publicId);
+			if (failDelete || Objects.equals(failDeletePublicId, publicId)) {
+				throw new ProfileImageStorageException("fake delete failure");
+			}
 		}
 
 		void reset() {
 			uploadCount = 0;
 			deleteCount = 0;
 			deletedPublicId = null;
+			deletedPublicIds.clear();
 			failUpload = false;
 			failDelete = false;
+			failDeletePublicId = null;
 		}
 	}
 }
