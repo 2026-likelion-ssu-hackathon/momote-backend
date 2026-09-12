@@ -26,6 +26,10 @@ import com.suspiciouslions.backend.domain.chat.dto.ParticipantClaimRequest;
 import com.suspiciouslions.backend.domain.chat.dto.CreateJoinRequestResponse;
 import com.suspiciouslions.backend.domain.chat.dto.JoinRequestStatusResponse;
 import com.suspiciouslions.backend.domain.chat.dto.CreateJoinRequestDocument;
+import com.suspiciouslions.backend.domain.chat.dto.JoinRequestListItemResponse;
+import com.suspiciouslions.backend.domain.chat.dto.AcceptJoinRequestResponse;
+import com.suspiciouslions.backend.domain.chat.dto.RejectJoinRequestResponse;
+import com.suspiciouslions.backend.domain.chat.entity.JoinRequestStatus;
 import com.suspiciouslions.backend.domain.chat.service.ChatService;
 import com.suspiciouslions.backend.domain.chat.service.JoinRequestService;
 
@@ -131,6 +135,61 @@ public class ChatController {
 	@GetMapping("/join-requests/{requestId}")
 	public JoinRequestStatusResponse getJoinRequestStatus(@PathVariable @Positive Long requestId) {
 		return joinRequestService.getStatus(requestId);
+	}
+
+	@Operation(summary = "방장의 입장 요청 목록 조회",
+			description = "방 생성자가 상태별 입장 요청을 요청 시각 오름차순으로 조회합니다.",
+			tags = "Chat Room Join Requests")
+	@ApiResponses({
+			@ApiResponse(responseCode = "200", description = "목록 조회 성공",
+					content = @Content(array = @ArraySchema(schema = @Schema(implementation = JoinRequestListItemResponse.class)))),
+			@ApiResponse(responseCode = "400", description = "Path, Header 또는 status 형식 오류", content = @Content),
+			@ApiResponse(responseCode = "403", description = "방 생성자가 아님", content = @Content),
+			@ApiResponse(responseCode = "404", description = "채팅방을 찾을 수 없음", content = @Content)
+	})
+	@GetMapping("/{roomId}/join-requests")
+	public List<JoinRequestListItemResponse> getJoinRequests(
+			@PathVariable @Positive Long roomId,
+			@Parameter(name = "X-User-Id", in = ParameterIn.HEADER, required = true, example = "1")
+			@RequestHeader("X-User-Id") @Positive Long userId,
+			@RequestParam(defaultValue = "PENDING") JoinRequestStatus status) {
+		return joinRequestService.getRequests(roomId, userId, status);
+	}
+
+	@Operation(summary = "입장 요청 수락", description = "방 생성자가 PENDING 요청을 수락합니다.",
+			tags = "Chat Room Join Requests")
+	@ApiResponses({
+			@ApiResponse(responseCode = "200", description = "수락 성공",
+					content = @Content(schema = @Schema(implementation = AcceptJoinRequestResponse.class))),
+			@ApiResponse(responseCode = "400", description = "Path 또는 Header 형식 오류", content = @Content),
+			@ApiResponse(responseCode = "403", description = "방 생성자가 아님", content = @Content),
+			@ApiResponse(responseCode = "404", description = "방 또는 해당 방의 요청을 찾을 수 없음", content = @Content),
+			@ApiResponse(responseCode = "409", description = "이미 처리된 요청 또는 정원이 찬 방", content = @Content)
+	})
+	@PostMapping("/{roomId}/join-requests/{requestId}/accept")
+	public AcceptJoinRequestResponse acceptJoinRequest(
+			@PathVariable @Positive Long roomId,
+			@PathVariable @Positive Long requestId,
+			@RequestHeader("X-User-Id") @Positive Long userId) {
+		return joinRequestService.accept(roomId, requestId, userId);
+	}
+
+	@Operation(summary = "입장 요청 거절", description = "방 생성자가 PENDING 요청을 거절합니다.",
+			tags = "Chat Room Join Requests")
+	@ApiResponses({
+			@ApiResponse(responseCode = "200", description = "거절 성공",
+					content = @Content(schema = @Schema(implementation = RejectJoinRequestResponse.class))),
+			@ApiResponse(responseCode = "400", description = "Path 또는 Header 형식 오류", content = @Content),
+			@ApiResponse(responseCode = "403", description = "방 생성자가 아님", content = @Content),
+			@ApiResponse(responseCode = "404", description = "방 또는 해당 방의 요청을 찾을 수 없음", content = @Content),
+			@ApiResponse(responseCode = "409", description = "이미 처리된 요청", content = @Content)
+	})
+	@PostMapping("/{roomId}/join-requests/{requestId}/reject")
+	public RejectJoinRequestResponse rejectJoinRequest(
+			@PathVariable @Positive Long roomId,
+			@PathVariable @Positive Long requestId,
+			@RequestHeader("X-User-Id") @Positive Long userId) {
+		return joinRequestService.reject(roomId, requestId, userId);
 	}
 
 	@Operation(summary = "참가자 닉네임 및 프로필 이미지 등록",
