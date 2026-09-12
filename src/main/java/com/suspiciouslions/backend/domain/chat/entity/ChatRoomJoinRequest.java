@@ -92,4 +92,21 @@ public class ChatRoomJoinRequest {
 	public User getAssignedUser() {
 		return assignedUser;
 	}
+
+	public void accept(User assignedUser) {
+		ensurePending();
+		this.status = JoinRequestStatus.ACCEPTED;
+		this.assignedUser = assignedUser;
+	}
+
+	public void reject() {
+		ensurePending();
+		this.status = JoinRequestStatus.REJECTED;
+	}
+
+	private void ensurePending() {
+		if (status != JoinRequestStatus.PENDING) {
+			throw new IllegalStateException("Only a pending join request can be processed");
+		}
+	}
 }
