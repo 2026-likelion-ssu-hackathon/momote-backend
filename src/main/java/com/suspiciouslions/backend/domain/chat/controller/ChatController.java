@@ -23,7 +23,11 @@ import com.suspiciouslions.backend.domain.chat.dto.JoinChatRoomRequest;
 import com.suspiciouslions.backend.domain.chat.dto.JoinChatRoomResponse;
 import com.suspiciouslions.backend.domain.chat.dto.ParticipantClaimResponse;
 import com.suspiciouslions.backend.domain.chat.dto.ParticipantClaimRequest;
+import com.suspiciouslions.backend.domain.chat.dto.CreateJoinRequestResponse;
+import com.suspiciouslions.backend.domain.chat.dto.JoinRequestStatusResponse;
+import com.suspiciouslions.backend.domain.chat.dto.CreateJoinRequestDocument;
 import com.suspiciouslions.backend.domain.chat.service.ChatService;
+import com.suspiciouslions.backend.domain.chat.service.JoinRequestService;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -69,9 +73,11 @@ public class ChatController {
 			""";
 
 	private final ChatService chatService;
+	private final JoinRequestService joinRequestService;
 
-	public ChatController(ChatService chatService) {
+	public ChatController(ChatService chatService, JoinRequestService joinRequestService) {
 		this.chatService = chatService;
+		this.joinRequestService = joinRequestService;
 	}
 
 	@Operation(summary = "초대 코드 채팅방 생성", description = "첫 임시 참가자와 6자리 초대 코드를 생성합니다.", tags = "Chat Rooms")
@@ -90,6 +96,41 @@ public class ChatController {
 	@PostMapping(path = "/join", consumes = MediaType.APPLICATION_JSON_VALUE)
 	public JoinChatRoomResponse joinChatRoom(@Valid @RequestBody JoinChatRoomRequest request) {
 		return chatService.joinChatRoom(request.inviteCode());
+	}
+
+	@Operation(summary = "채팅방 입장 요청 생성",
+			description = "초대 코드와 닉네임, 선택 프로필 이미지로 PENDING 입장 요청을 생성합니다.",
+			tags = "Chat Room Join Requests",
+			requestBody = @io.swagger.v3.oas.annotations.parameters.RequestBody(required = true,
+					content = @Content(mediaType = MediaType.MULTIPART_FORM_DATA_VALUE,
+							schema = @Schema(implementation = CreateJoinRequestDocument.class))))
+	@ApiResponses({
+			@ApiResponse(responseCode = "200", description = "입장 요청 생성 성공",
+					content = @Content(schema = @Schema(implementation = CreateJoinRequestResponse.class))),
+			@ApiResponse(responseCode = "400", description = "필수값 또는 이미지 형식/크기 오류", content = @Content),
+			@ApiResponse(responseCode = "404", description = "초대 코드를 찾을 수 없음", content = @Content),
+			@ApiResponse(responseCode = "409", description = "이미 참가자가 두 명인 방", content = @Content),
+			@ApiResponse(responseCode = "502", description = "프로필 이미지 업로드 실패", content = @Content)
+	})
+	@PostMapping(path = "/join-requests", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+	public CreateJoinRequestResponse createJoinRequest(
+			@Parameter(hidden = true) @RequestParam @NotBlank String inviteCode,
+			@Parameter(hidden = true) @RequestParam @NotBlank String nickname,
+			@Parameter(hidden = true) @RequestParam(required = false) MultipartFile profileImage) {
+		return joinRequestService.create(inviteCode, nickname, profileImage);
+	}
+
+	@Operation(summary = "채팅방 입장 요청 상태 조회",
+			description = "requestId로 입장 요청의 현재 상태를 조회합니다.", tags = "Chat Room Join Requests")
+	@ApiResponses({
+			@ApiResponse(responseCode = "200", description = "상태 조회 성공",
+					content = @Content(schema = @Schema(implementation = JoinRequestStatusResponse.class))),
+			@ApiResponse(responseCode = "400", description = "requestId 형식 오류", content = @Content),
+			@ApiResponse(responseCode = "404", description = "입장 요청을 찾을 수 없음", content = @Content)
+	})
+	@GetMapping("/join-requests/{requestId}")
+	public JoinRequestStatusResponse getJoinRequestStatus(@PathVariable @Positive Long requestId) {
+		return joinRequestService.getStatus(requestId);
 	}
 
 	@Operation(summary = "참가자 닉네임 및 프로필 이미지 등록",

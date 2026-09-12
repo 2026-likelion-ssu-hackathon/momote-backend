@@ -69,6 +69,23 @@ class ProfileImageStorageUnavailableApiTests {
 				.andExpect(status().isBadGateway());
 	}
 
+	@Test
+	void joinRequestWithoutImageSucceedsButImageRequestFails() throws Exception {
+		ChatRoom room = createRoom();
+		room.assignInviteCode("NOCLD1");
+		chatRoomRepository.saveAndFlush(room);
+		mockMvc.perform(multipart("/api/chat-rooms/join-requests")
+				.param("inviteCode", "NOCLD1").param("nickname", "지민"))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("PENDING"));
+
+		MockMultipartFile image = new MockMultipartFile(
+				"profileImage", "profile.png", MediaType.IMAGE_PNG_VALUE, "image".getBytes());
+		mockMvc.perform(multipart("/api/chat-rooms/join-requests")
+				.file(image).param("inviteCode", "NOCLD1").param("nickname", "민지"))
+				.andExpect(status().isBadGateway());
+	}
+
 	private ChatRoom createRoom() {
 		OffsetDateTime now = OffsetDateTime.now();
 		User user = userRepository.save(new User(null, null, null, null, now, now));

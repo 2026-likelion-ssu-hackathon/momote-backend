@@ -110,14 +110,15 @@ class BackendApplicationTests {
 				WHERE table_schema = 'public'
 				  AND table_name IN (
 				      'users', 'chat_rooms', 'messages', 'ai_results',
-				      'emotion_analyses', 'flyway_schema_history'
+				      'emotion_analyses', 'chat_room_join_requests', 'flyway_schema_history'
 				  )
 				ORDER BY table_name
 				""", String.class);
 
-		assertEquals(List.of("1", "2", "3"), migrations);
+		assertEquals(List.of("1", "2", "3", "4"), migrations);
 		assertEquals(List.of(
 				"ai_results",
+				"chat_room_join_requests",
 				"chat_rooms",
 				"emotion_analyses",
 				"flyway_schema_history",
