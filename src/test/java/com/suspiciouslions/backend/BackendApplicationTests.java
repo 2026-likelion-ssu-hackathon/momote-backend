@@ -13,6 +13,8 @@ import java.util.UUID;
 import javax.sql.DataSource;
 
 import org.junit.jupiter.api.Test;
+import org.flywaydb.core.Flyway;
+import org.flywaydb.core.api.MigrationVersion;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
@@ -20,6 +22,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.annotation.Transactional;
 import org.testcontainers.junit.jupiter.Container;
@@ -47,6 +50,7 @@ import jakarta.persistence.EntityManager;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -115,7 +119,7 @@ class BackendApplicationTests {
 				ORDER BY table_name
 				""", String.class);
 
-		assertEquals(List.of("1", "2", "3", "4"), migrations);
+		assertEquals(List.of("1", "2", "3", "4", "5"), migrations);
 		assertEquals(List.of(
 				"ai_results",
 				"chat_room_join_requests",
@@ -130,7 +134,11 @@ class BackendApplicationTests {
 				SELECT table_name || '.' || column_name
 				FROM information_schema.columns
 				WHERE table_schema = 'public'
-				  AND (table_name = 'users' AND column_name = 'nickname' OR table_name = 'chat_rooms' AND column_name = 'user_b_id')
+				  AND (
+				      table_name = 'users' AND column_name IN ('nickname', 'gender')
+				      OR table_name = 'chat_rooms' AND column_name = 'user_b_id'
+				      OR table_name = 'chat_room_join_requests' AND column_name = 'gender'
+				  )
 				  AND is_nullable = 'YES'
 				ORDER BY table_name, column_name
 				""", String.class);
@@ -151,10 +159,88 @@ class BackendApplicationTests {
 				  AND tc.constraint_type = 'UNIQUE'
 				  AND kcu.column_name = 'invite_code'
 				""", String.class);
+		List<String> genderCheckConstraints = jdbcTemplate.queryForList("""
+				SELECT constraint_name
+				FROM information_schema.table_constraints
+				WHERE constraint_schema = 'public'
+				  AND constraint_type = 'CHECK'
+				  AND constraint_name IN ('ck_users_gender', 'ck_join_requests_gender')
+				ORDER BY constraint_name
+				""", String.class);
 
-		assertEquals(List.of("chat_rooms.user_b_id", "users.nickname"), nullableColumns);
+		assertEquals(List.of(
+				"chat_room_join_requests.gender", "chat_rooms.user_b_id", "users.gender", "users.nickname"
+		), nullableColumns);
 		assertEquals(List.of("invite_code"), inviteCodeColumns);
 		assertEquals(List.of("uq_chat_rooms_invite_code"), inviteCodeUniqueConstraints);
+		assertEquals(List.of("ck_join_requests_gender", "ck_users_gender"), genderCheckConstraints);
+	}
+
+	@Test
+	void genderMigrationPreservesExistingRowsAsNull() {
+		String schema = "gender_migration_" + UUID.randomUUID().toString().replace("-", "");
+		jdbcTemplate.execute("CREATE SCHEMA " + schema);
+		try {
+			migrateSchema(schema, MigrationVersion.fromVersion("4"));
+			JdbcTemplate isolated = new JdbcTemplate(new DriverManagerDataSource(
+					postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword()));
+			Long userAId = isolated.queryForObject("""
+					INSERT INTO %s.users (nickname, created_at, updated_at)
+					VALUES ('기존 A', now(), now()) RETURNING id
+					""".formatted(schema), Long.class);
+			Long userBId = isolated.queryForObject("""
+					INSERT INTO %s.users (nickname, created_at, updated_at)
+					VALUES ('기존 B', now(), now()) RETURNING id
+					""".formatted(schema), Long.class);
+			Long roomId = isolated.queryForObject("""
+					INSERT INTO %s.chat_rooms
+					(user_a_id, user_b_id, room_status, created_at, invite_code)
+					VALUES (?, ?, 'ACTIVE', now(), 'OLDROW') RETURNING id
+					""".formatted(schema), Long.class, userAId, userBId);
+			Long requestId = isolated.queryForObject("""
+					INSERT INTO %s.chat_room_join_requests (chat_room_id, nickname, requested_at)
+					VALUES (?, '기존 요청', now()) RETURNING id
+					""".formatted(schema), Long.class, roomId);
+
+			migrateSchema(schema, null);
+
+			assertNull(isolated.queryForObject(
+					"SELECT gender FROM " + schema + ".users WHERE id = ?", String.class, userAId));
+			assertNull(isolated.queryForObject(
+					"SELECT gender FROM " + schema + ".chat_room_join_requests WHERE id = ?",
+					String.class, requestId));
+		} finally {
+			jdbcTemplate.execute("DROP SCHEMA " + schema + " CASCADE");
+		}
+	}
+
+	@Test
+	@Transactional
+	void databaseRejectsUnsupportedUserGender() {
+		assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update("""
+				INSERT INTO users (nickname, gender, created_at, updated_at)
+				VALUES ('잘못된 성별', 'OTHER', now(), now())
+				"""));
+	}
+
+	@Test
+	@Transactional
+	void databaseRejectsUnsupportedJoinRequestGender() {
+		TestContext context = createTestContext();
+		assertThrows(DataIntegrityViolationException.class, () -> jdbcTemplate.update("""
+				INSERT INTO chat_room_join_requests (chat_room_id, nickname, gender, requested_at)
+				VALUES (?, '잘못된 성별', 'OTHER', now())
+				""", context.chatRoom().getId()));
+	}
+
+	private void migrateSchema(String schema, MigrationVersion target) {
+		var configuration = Flyway.configure()
+				.dataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword())
+				.locations("classpath:db/migration")
+				.defaultSchema(schema)
+				.schemas(schema);
+		if (target != null) configuration.target(target);
+		configuration.load().migrate();
 	}
 
 	@Test
