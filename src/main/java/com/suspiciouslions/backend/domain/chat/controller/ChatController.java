@@ -32,6 +32,7 @@ import com.suspiciouslions.backend.domain.chat.dto.RejectJoinRequestResponse;
 import com.suspiciouslions.backend.domain.chat.entity.JoinRequestStatus;
 import com.suspiciouslions.backend.domain.chat.service.ChatService;
 import com.suspiciouslions.backend.domain.chat.service.JoinRequestService;
+import com.suspiciouslions.backend.domain.user.entity.Gender;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -60,7 +61,8 @@ public class ChatController {
 			  "partner": {
 			    "userId": 2,
 			    "nickname": "카카포",
-			    "profileImageUrl": "https://example.com/profile.png"
+			    "profileImageUrl": "https://example.com/profile.png",
+			    "gender": "FEMALE"
 			  }
 			}
 			""";
@@ -103,7 +105,7 @@ public class ChatController {
 	}
 
 	@Operation(summary = "채팅방 입장 요청 생성",
-			description = "초대 코드와 닉네임, 선택 프로필 이미지로 PENDING 입장 요청을 생성합니다.",
+			description = "초대 코드와 닉네임, 선택 프로필 이미지 및 gender(MALE/FEMALE)로 PENDING 입장 요청을 생성합니다.",
 			tags = "Chat Room Join Requests",
 			requestBody = @io.swagger.v3.oas.annotations.parameters.RequestBody(required = true,
 					content = @Content(mediaType = MediaType.MULTIPART_FORM_DATA_VALUE,
@@ -111,7 +113,7 @@ public class ChatController {
 	@ApiResponses({
 			@ApiResponse(responseCode = "200", description = "입장 요청 생성 성공",
 					content = @Content(schema = @Schema(implementation = CreateJoinRequestResponse.class))),
-			@ApiResponse(responseCode = "400", description = "필수값 또는 이미지 형식/크기 오류", content = @Content),
+			@ApiResponse(responseCode = "400", description = "필수값, gender 또는 이미지 형식/크기 오류", content = @Content),
 			@ApiResponse(responseCode = "404", description = "초대 코드를 찾을 수 없음", content = @Content),
 			@ApiResponse(responseCode = "409", description = "이미 참가자가 두 명인 방", content = @Content),
 			@ApiResponse(responseCode = "502", description = "프로필 이미지 업로드 실패", content = @Content)
@@ -120,8 +122,9 @@ public class ChatController {
 	public CreateJoinRequestResponse createJoinRequest(
 			@Parameter(hidden = true) @RequestParam @NotBlank String inviteCode,
 			@Parameter(hidden = true) @RequestParam @NotBlank String nickname,
-			@Parameter(hidden = true) @RequestParam(required = false) MultipartFile profileImage) {
-		return joinRequestService.create(inviteCode, nickname, profileImage);
+			@Parameter(hidden = true) @RequestParam(required = false) MultipartFile profileImage,
+			@Parameter(hidden = true) @RequestParam(required = false) Gender gender) {
+		return joinRequestService.create(inviteCode, nickname, profileImage, gender);
 	}
 
 	@Operation(summary = "채팅방 입장 요청 상태 조회",
@@ -192,14 +195,16 @@ public class ChatController {
 		return joinRequestService.reject(roomId, requestId, userId);
 	}
 
-	@Operation(summary = "참가자 닉네임 및 프로필 이미지 등록",
-			description = "nickname은 필수이고 profileImage는 선택입니다. 이미지는 image/*, 최대 5MB이며 Cloudinary profiles 폴더에 저장됩니다.",
+	@Operation(summary = "참가자 닉네임 및 프로필 등록",
+			description = "nickname은 필수이고 profileImage와 gender(MALE/FEMALE)는 선택입니다. 이미지는 image/*, 최대 5MB이며 Cloudinary profiles 폴더에 저장됩니다.",
 			tags = "Chat Rooms",
 			requestBody = @io.swagger.v3.oas.annotations.parameters.RequestBody(required = true,
 					content = @Content(mediaType = MediaType.MULTIPART_FORM_DATA_VALUE,
 							schema = @Schema(implementation = ParticipantClaimRequest.class))))
 	@ApiResponses({
-			@ApiResponse(responseCode = "200", description = "등록 성공"),
+			@ApiResponse(responseCode = "200", description = "등록 성공",
+					content = @Content(schema = @Schema(implementation = ParticipantClaimResponse.class))),
+			@ApiResponse(responseCode = "400", description = "필수값, gender 또는 이미지 형식/크기 오류", content = @Content),
 			@ApiResponse(responseCode = "403", description = "다른 방의 사용자", content = @Content),
 			@ApiResponse(responseCode = "404", description = "사용자 또는 채팅방을 찾을 수 없음", content = @Content),
 			@ApiResponse(responseCode = "409", description = "이미 등록했거나 두 참가자 모두 등록됨", content = @Content),
@@ -211,8 +216,9 @@ public class ChatController {
 			@RequestHeader("X-User-Id") @Positive Long userId,
 			@Parameter(hidden = true) @RequestParam @NotBlank String nickname,
 			@Parameter(hidden = true)
-		@RequestParam(required = false) MultipartFile profileImage) {
-		return chatService.claimNickname(chatRoomId, userId, nickname, profileImage);
+		@RequestParam(required = false) MultipartFile profileImage,
+			@Parameter(hidden = true) @RequestParam(required = false) Gender gender) {
+		return chatService.claimNickname(chatRoomId, userId, nickname, profileImage, gender);
 	}
 
 	@Operation(summary = "채팅방 조회", description = "참여 중인 채팅방과 상대방 정보를 조회합니다.", tags = "Chat Rooms")

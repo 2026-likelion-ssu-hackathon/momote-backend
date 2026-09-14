@@ -42,6 +42,7 @@ import com.suspiciouslions.backend.domain.chat.repository.ChatRoomJoinRequestRep
 import com.suspiciouslions.backend.domain.chat.repository.ChatRoomRepository;
 import com.suspiciouslions.backend.domain.chat.service.JoinRequestService;
 import com.suspiciouslions.backend.domain.user.entity.User;
+import com.suspiciouslions.backend.domain.user.entity.Gender;
 import com.suspiciouslions.backend.domain.user.repository.UserRepository;
 import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage;
 import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage.UploadedProfileImage;
@@ -92,7 +93,7 @@ class JoinRequestApiTests {
 		long userCount = userRepository.count();
 
 		mockMvc.perform(multipart("/api/chat-rooms/join-requests")
-				.param("inviteCode", "OPEN01").param("nickname", "지민"))
+				.param("inviteCode", "OPEN01").param("nickname", "지민").param("gender", "MALE"))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.requestId").isNumber())
 				.andExpect(jsonPath("$.roomId").value(room.getId()))
@@ -100,6 +101,7 @@ class JoinRequestApiTests {
 
 		assertEquals(userCount, userRepository.count());
 		assertNull(chatRoomRepository.findWithUsersById(room.getId()).orElseThrow().getUserB());
+		assertEquals(Gender.MALE, joinRequestRepository.findAll().get(0).getGender());
 		assertEquals(0, storage.uploadCount);
 	}
 
@@ -108,14 +110,32 @@ class JoinRequestApiTests {
 		ChatRoom room = createOpenRoom("IMAGE1");
 		mockMvc.perform(multipart("/api/chat-rooms/join-requests")
 				.file(image("image".getBytes()))
-				.param("inviteCode", "IMAGE1").param("nickname", "지민"))
+				.param("inviteCode", "IMAGE1").param("nickname", "지민").param("gender", "FEMALE"))
 				.andExpect(status().isOk()).andExpect(jsonPath("$.status").value("PENDING"));
 
 		ChatRoomJoinRequest saved = joinRequestRepository.findAll().get(0);
 		assertEquals(room.getId(), saved.getChatRoom().getId());
 		assertEquals("https://example.test/profiles/join-1", saved.getProfileImageUrl());
 		assertEquals("profiles/join-1", saved.getProfileImagePublicId());
+		assertEquals(Gender.FEMALE, saved.getGender());
 		assertEquals(1, storage.uploadCount);
+	}
+
+	@Test
+	void createsRequestWithoutGenderAndRejectsInvalidGenderBeforeUploadOrSave() throws Exception {
+		createOpenRoom("NOGEND");
+		mockMvc.perform(multipart("/api/chat-rooms/join-requests")
+				.param("inviteCode", "NOGEND").param("nickname", "지민"))
+				.andExpect(status().isOk());
+		assertNull(joinRequestRepository.findAll().get(0).getGender());
+		long requestCount = joinRequestRepository.count();
+
+		mockMvc.perform(multipart("/api/chat-rooms/join-requests")
+				.file(image("image".getBytes()))
+				.param("inviteCode", "NOGEND").param("nickname", "민상").param("gender", "OTHER"))
+				.andExpect(status().isBadRequest());
+		assertEquals(requestCount, joinRequestRepository.count());
+		assertEquals(0, storage.uploadCount);
 	}
 
 	@Test
@@ -174,7 +194,8 @@ class JoinRequestApiTests {
 				.andExpect(jsonPath("$.roomId").doesNotExist())
 				.andExpect(jsonPath("$.userId").doesNotExist())
 				.andExpect(jsonPath("$.nickname").doesNotExist())
-				.andExpect(jsonPath("$.profileImageUrl").doesNotExist());
+				.andExpect(jsonPath("$.profileImageUrl").doesNotExist())
+				.andExpect(jsonPath("$.gender").doesNotExist());
 		mockMvc.perform(get("/api/chat-rooms/join-requests/{requestId}", 999999L))
 				.andExpect(status().isNotFound());
 	}
@@ -221,8 +242,12 @@ class JoinRequestApiTests {
 				.andExpect(jsonPath("$.components.schemas.CreateJoinRequestDocument.required", hasItem("inviteCode")))
 				.andExpect(jsonPath("$.components.schemas.CreateJoinRequestDocument.required", hasItem("nickname")))
 				.andExpect(jsonPath("$.components.schemas.CreateJoinRequestDocument.required", not(hasItem("profileImage"))))
+				.andExpect(jsonPath("$.components.schemas.CreateJoinRequestDocument.required", not(hasItem("gender"))))
 				.andExpect(jsonPath("$.components.schemas.CreateJoinRequestDocument.properties.profileImage.type").value("string"))
 				.andExpect(jsonPath("$.components.schemas.CreateJoinRequestDocument.properties.profileImage.format").value("binary"))
+				.andExpect(jsonPath("$.components.schemas.CreateJoinRequestDocument.properties.gender.enum",
+						org.hamcrest.Matchers.contains("MALE", "FEMALE")))
+				.andExpect(jsonPath("$.components.schemas.JoinRequestStatusResponse.properties.gender").exists())
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/join-requests/{requestId}'].get.responses['200'].content['*/*'].schema['$ref']")
 						.value("#/components/schemas/JoinRequestStatusResponse"))
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/{roomId}/join-requests'].get.parameters[?(@.name == 'status')].schema.default")
@@ -233,6 +258,7 @@ class JoinRequestApiTests {
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/{roomId}/join-requests/{requestId}/accept'].post.responses['409']").exists())
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/{roomId}/join-requests/{requestId}/reject'].post.responses['404']").exists())
 				.andExpect(jsonPath("$.components.schemas.JoinRequestListItemResponse.properties.requestId").exists())
+				.andExpect(jsonPath("$.components.schemas.JoinRequestListItemResponse.properties.gender").exists())
 				.andExpect(jsonPath("$.components.schemas.JoinRequestListItemResponse.properties.requestedAt.format").value("date-time"));
 	}
 
@@ -242,7 +268,8 @@ class JoinRequestApiTests {
 		mockMvc.perform(get("/api/chat-rooms/{roomId}/join-requests", room.getId())
 				.header("X-User-Id", room.getUserA().getId()))
 				.andExpect(status().isOk()).andExpect(jsonPath("$").isEmpty());
-		ChatRoomJoinRequest later = saveRequest(room, "나중", null, null, OffsetDateTime.now().plusMinutes(1));
+		ChatRoomJoinRequest later = saveRequest(
+				room, "나중", null, null, Gender.MALE, OffsetDateTime.now().plusMinutes(1));
 		ChatRoomJoinRequest rejected = saveRequest(room, "거절", null, null, OffsetDateTime.now());
 		rejected.reject();
 		joinRequestRepository.saveAndFlush(rejected);
@@ -254,7 +281,9 @@ class JoinRequestApiTests {
 				.andExpect(jsonPath("$.length()").value(2))
 				.andExpect(jsonPath("$[0].requestId").value(earlier.getId()))
 				.andExpect(jsonPath("$[0].profileImageUrl").isEmpty())
-				.andExpect(jsonPath("$[1].requestId").value(later.getId()));
+				.andExpect(jsonPath("$[0].gender").isEmpty())
+				.andExpect(jsonPath("$[1].requestId").value(later.getId()))
+				.andExpect(jsonPath("$[1].gender").value("MALE"));
 		mockMvc.perform(get("/api/chat-rooms/{roomId}/join-requests", room.getId())
 				.header("X-User-Id", room.getUserA().getId()).param("status", "REJECTED"))
 				.andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(1))
@@ -271,7 +300,8 @@ class JoinRequestApiTests {
 	@Test
 	void ownerAcceptsRequestCreatesParticipantAndAutoRejectsOthers() throws Exception {
 		ChatRoom room = createOpenRoom("ACCEPT");
-		ChatRoomJoinRequest accepted = saveRequest(room, "지민", "https://example.test/jimin", "profiles/jimin", OffsetDateTime.now());
+		ChatRoomJoinRequest accepted = saveRequest(
+				room, "지민", "https://example.test/jimin", "profiles/jimin", Gender.FEMALE, OffsetDateTime.now());
 		ChatRoomJoinRequest other = saveRequest(room, "민지", "https://example.test/minji", "profiles/minji", OffsetDateTime.now().plusSeconds(1));
 		ChatRoomJoinRequest another = saveRequest(room, "수진", "https://example.test/sujin", "profiles/sujin", OffsetDateTime.now().plusSeconds(2));
 		long userCount = userRepository.count();
@@ -289,6 +319,7 @@ class JoinRequestApiTests {
 		assertEquals(userCount + 1, userRepository.count());
 		assertEquals("지민", foundRoom.getUserB().getNickname());
 		assertEquals("https://example.test/jimin", foundRoom.getUserB().getProfileImageUrl());
+		assertEquals(Gender.FEMALE, foundRoom.getUserB().getGender());
 		ChatRoomJoinRequest foundAccepted = joinRequestRepository.findById(accepted.getId()).orElseThrow();
 		assertEquals(JoinRequestStatus.ACCEPTED, foundAccepted.getStatus());
 		assertEquals(foundRoom.getUserB().getId(), foundAccepted.getAssignedUser().getId());
@@ -303,17 +334,36 @@ class JoinRequestApiTests {
 				.andExpect(jsonPath("$.roomId").value(room.getId()))
 				.andExpect(jsonPath("$.userId").value(foundRoom.getUserB().getId()))
 				.andExpect(jsonPath("$.nickname").value("지민"))
-				.andExpect(jsonPath("$.profileImageUrl").value("https://example.test/jimin"));
+				.andExpect(jsonPath("$.profileImageUrl").value("https://example.test/jimin"))
+				.andExpect(jsonPath("$.gender").value("FEMALE"));
 		mockMvc.perform(get("/api/chat-rooms/{chatRoomId}", room.getId())
 				.header("X-User-Id", foundRoom.getUserB().getId()))
 				.andExpect(status().isOk())
 				.andExpect(jsonPath("$.partner.userId").value(room.getUserA().getId()));
+		mockMvc.perform(get("/api/chat-rooms/{chatRoomId}", room.getId())
+				.header("X-User-Id", room.getUserA().getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.partner.userId").value(foundRoom.getUserB().getId()))
+				.andExpect(jsonPath("$.partner.gender").value("FEMALE"));
+	}
+
+	@Test
+	void acceptingRequestWithoutGenderCreatesUserWithNullGender() throws Exception {
+		ChatRoom room = createOpenRoom("ACCNUL");
+		ChatRoomJoinRequest request = saveRequest(room, "지민", null, null, OffsetDateTime.now());
+		mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
+				"/api/chat-rooms/{roomId}/join-requests/{requestId}/accept", room.getId(), request.getId())
+				.header("X-User-Id", room.getUserA().getId()))
+				.andExpect(status().isOk());
+		ChatRoom acceptedRoom = chatRoomRepository.findWithUsersById(room.getId()).orElseThrow();
+		assertNull(acceptedRoom.getUserB().getGender());
 	}
 
 	@Test
 	void rejectCommitsBeforeImageCleanupAndAllowsAnotherRequest() throws Exception {
 		ChatRoom room = createOpenRoom("REJECT");
-		ChatRoomJoinRequest request = saveRequest(room, "지민", "https://example.test/jimin", "profiles/jimin", OffsetDateTime.now());
+		ChatRoomJoinRequest request = saveRequest(
+				room, "지민", "https://example.test/jimin", "profiles/jimin", Gender.MALE, OffsetDateTime.now());
 		long userCount = userRepository.count();
 		storage.failDelete = true;
 
@@ -327,6 +377,10 @@ class JoinRequestApiTests {
 		assertEquals(userCount, userRepository.count());
 		assertEquals("REJECT", chatRoomRepository.findById(room.getId()).orElseThrow().getInviteCode());
 		assertEquals(List.of("profiles/jimin"), storage.deletedPublicIds);
+		mockMvc.perform(get("/api/chat-rooms/join-requests/{requestId}", request.getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.status").value("REJECTED"))
+				.andExpect(jsonPath("$.gender").doesNotExist());
 		ChatRoomJoinRequest noImage = saveRequest(room, "이미지없음", null, null, OffsetDateTime.now().plusSeconds(1));
 		mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post(
 				"/api/chat-rooms/{roomId}/join-requests/{requestId}/reject", room.getId(), noImage.getId())
@@ -446,8 +500,13 @@ class JoinRequestApiTests {
 
 	private ChatRoomJoinRequest saveRequest(ChatRoom room, String nickname, String imageUrl,
 			String publicId, OffsetDateTime requestedAt) {
+		return saveRequest(room, nickname, imageUrl, publicId, null, requestedAt);
+	}
+
+	private ChatRoomJoinRequest saveRequest(ChatRoom room, String nickname, String imageUrl,
+			String publicId, Gender gender, OffsetDateTime requestedAt) {
 		return joinRequestRepository.saveAndFlush(
-				new ChatRoomJoinRequest(room, nickname, imageUrl, publicId, requestedAt));
+				new ChatRoomJoinRequest(room, nickname, imageUrl, publicId, gender, requestedAt));
 	}
 
 	private JoinRequestService serviceWhoseCommitFails(RuntimeException failure) {

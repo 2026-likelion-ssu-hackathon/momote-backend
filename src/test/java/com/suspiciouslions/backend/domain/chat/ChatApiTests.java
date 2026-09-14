@@ -42,6 +42,7 @@ import com.suspiciouslions.backend.domain.chat.repository.MessageRepository;
 import com.suspiciouslions.backend.domain.chat.service.ChatService;
 import com.suspiciouslions.backend.domain.chat.dto.CreateChatRoomResponse;
 import com.suspiciouslions.backend.domain.user.entity.User;
+import com.suspiciouslions.backend.domain.user.entity.Gender;
 import com.suspiciouslions.backend.domain.user.repository.UserRepository;
 import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage;
 import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage.UploadedProfileImage;
@@ -107,7 +108,14 @@ class ChatApiTests {
 				.andExpect(jsonPath("$.relationshipStartedOn").value("2026-08-01"))
 				.andExpect(jsonPath("$.partner.userId").value(context.userB().getId()))
 				.andExpect(jsonPath("$.partner.nickname").value("사용자 B"))
-				.andExpect(jsonPath("$.partner.profileImageUrl").value("https://example.com/b.png"));
+				.andExpect(jsonPath("$.partner.profileImageUrl").value("https://example.com/b.png"))
+				.andExpect(jsonPath("$.partner.gender").value("FEMALE"));
+
+		mockMvc.perform(get("/api/chat-rooms/{chatRoomId}", context.chatRoom().getId())
+					.header("X-User-Id", context.userB().getId()))
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.partner.userId").value(context.userA().getId()))
+				.andExpect(jsonPath("$.partner.gender").value("MALE"));
 	}
 
 	@Test
@@ -131,6 +139,7 @@ class ChatApiTests {
 		ChatRoom room = chatRoomRepository.findAll().stream()
 				.filter(candidate -> response.contains("\"roomId\":" + candidate.getId()))
 				.findFirst().orElseThrow();
+		assertEquals(null, room.getUserA().getGender());
 
 		mockMvc.perform(get("/api/chat-rooms/{chatRoomId}", room.getId()).header("X-User-Id", room.getUserA().getId()))
 				.andExpect(status().isOk()).andExpect(jsonPath("$.partner").doesNotExist());
@@ -148,16 +157,51 @@ class ChatApiTests {
 		chatRoomRepository.saveAndFlush(room);
 		mockMvc.perform(multipart("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
 				.header("X-User-Id", room.getUserA().getId()).param("nickname", "지민")
+				.param("gender", "FEMALE")
 				.file(imageFile("image-data".getBytes())).contentType(MediaType.MULTIPART_FORM_DATA)
 				.characterEncoding("UTF-8"))
 				.andExpect(status().isOk())
-				.andExpect(jsonPath("$.profileImageUrl").value("https://example.test/profiles/image-1"));
+				.andExpect(jsonPath("$.profileImageUrl").value("https://example.test/profiles/image-1"))
+				.andExpect(jsonPath("$.gender").value("FEMALE"));
 		org.junit.jupiter.api.Assertions.assertEquals(1, profileImageStorage.uploadCount);
+		assertEquals(Gender.FEMALE, userRepository.findById(room.getUserA().getId()).orElseThrow().getGender());
 
 		mockMvc.perform(get("/api/chat-rooms/{chatRoomId}", room.getId())
 				.header("X-User-Id", partner.getId()))
 				.andExpect(status().isOk())
-				.andExpect(jsonPath("$.partner.profileImageUrl").value("https://example.test/profiles/image-1"));
+				.andExpect(jsonPath("$.partner.profileImageUrl").value("https://example.test/profiles/image-1"))
+				.andExpect(jsonPath("$.partner.gender").value("FEMALE"));
+	}
+
+	@Test
+	void claimStoresBothGendersAndKeepsMissingGenderNull() throws Exception {
+		ChatRoom maleRoom = createInviteRoom("GENDM1");
+		mockMvc.perform(post("/api/chat-rooms/{chatRoomId}/participants/claim", maleRoom.getId())
+				.contentType(MediaType.MULTIPART_FORM_DATA)
+				.header("X-User-Id", maleRoom.getUserA().getId())
+				.param("nickname", "민상").param("gender", "MALE"))
+				.andExpect(status().isOk()).andExpect(jsonPath("$.gender").value("MALE"));
+		assertEquals(Gender.MALE, userRepository.findById(maleRoom.getUserA().getId()).orElseThrow().getGender());
+
+		ChatRoom noGenderRoom = createInviteRoom("GENDN1");
+		mockMvc.perform(post("/api/chat-rooms/{chatRoomId}/participants/claim", noGenderRoom.getId())
+				.contentType(MediaType.MULTIPART_FORM_DATA)
+				.header("X-User-Id", noGenderRoom.getUserA().getId())
+				.param("nickname", "지민"))
+				.andExpect(status().isOk()).andExpect(jsonPath("$.gender").isEmpty());
+		assertEquals(null, userRepository.findById(noGenderRoom.getUserA().getId()).orElseThrow().getGender());
+	}
+
+	@Test
+	void invalidClaimGenderIsRejectedBeforeImageUpload() throws Exception {
+		ChatRoom room = createInviteRoom();
+		mockMvc.perform(multipart("/api/chat-rooms/{chatRoomId}/participants/claim", room.getId())
+				.header("X-User-Id", room.getUserA().getId())
+				.param("nickname", "지민").param("gender", "OTHER")
+				.file(imageFile("image".getBytes())))
+				.andExpect(status().isBadRequest());
+		assertEquals(0, profileImageStorage.uploadCount);
+		assertEquals(null, userRepository.findById(room.getUserA().getId()).orElseThrow().getNickname());
 	}
 
 	@Test
@@ -260,6 +304,7 @@ class ChatApiTests {
 		mockMvc.perform(post("/api/chat-rooms/join").contentType(MediaType.APPLICATION_JSON)
 				.content("{\"inviteCode\":\"" + room.getInviteCode() + "\"}"))
 				.andExpect(status().isOk()).andExpect(jsonPath("$.roomId").value(room.getId()));
+		assertEquals(null, chatRoomRepository.findWithUsersById(room.getId()).orElseThrow().getUserB().getGender());
 		mockMvc.perform(post("/api/chat-rooms/join").contentType(MediaType.APPLICATION_JSON)
 				.content("{\"inviteCode\":\"" + room.getInviteCode() + "\"}"))
 				.andExpect(status().isConflict());
@@ -483,8 +528,13 @@ class ChatApiTests {
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/{chatRoomId}/participants/claim'].post.requestBody.content['multipart/form-data'].schema['$ref']").value("#/components/schemas/ParticipantClaimRequest"))
 				.andExpect(jsonPath("$.components.schemas.ParticipantClaimRequest.required", hasItem("nickname")))
 				.andExpect(jsonPath("$.components.schemas.ParticipantClaimRequest.required", org.hamcrest.Matchers.not(hasItem("profileImage"))))
+				.andExpect(jsonPath("$.components.schemas.ParticipantClaimRequest.required", org.hamcrest.Matchers.not(hasItem("gender"))))
 				.andExpect(jsonPath("$.components.schemas.ParticipantClaimRequest.properties.profileImage.type").value("string"))
 				.andExpect(jsonPath("$.components.schemas.ParticipantClaimRequest.properties.profileImage.format").value("binary"))
+				.andExpect(jsonPath("$.components.schemas.ParticipantClaimRequest.properties.gender.enum",
+						org.hamcrest.Matchers.contains("MALE", "FEMALE")))
+				.andExpect(jsonPath("$.components.schemas.ParticipantClaimResponse.properties.gender").exists())
+				.andExpect(jsonPath("$.components.schemas.PartnerResponse.properties.gender").exists())
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/{chatRoomId}'].get.summary").value("채팅방 조회"))
 				.andExpect(jsonPath("$.paths['/api/chat-rooms/{chatRoomId}/messages'].post.requestBody.required")
 						.value(true))
@@ -497,8 +547,8 @@ class ChatApiTests {
 	}
 
 	private TestContext createTestContext() {
-		User userA = saveUser("사용자 A", "https://example.com/a.png");
-		User userB = saveUser("사용자 B", "https://example.com/b.png");
+		User userA = saveUser("사용자 A", "https://example.com/a.png", Gender.MALE);
+		User userB = saveUser("사용자 B", "https://example.com/b.png", Gender.FEMALE);
 		ChatRoom chatRoom = chatRoomRepository.save(new ChatRoom(
 				userA,
 				userB,
@@ -511,9 +561,13 @@ class ChatApiTests {
 	}
 
 	private ChatRoom createInviteRoom() {
+		return createInviteRoom("INVITE1");
+	}
+
+	private ChatRoom createInviteRoom(String inviteCode) {
 		User user = saveUser(null, null);
 		ChatRoom room = new ChatRoom(user, null, null, RoomStatus.ACTIVE, time(0), null);
-		room.assignInviteCode("INVITE1");
+		room.assignInviteCode(inviteCode);
 		return chatRoomRepository.saveAndFlush(room);
 	}
 
@@ -533,6 +587,10 @@ class ChatApiTests {
 
 	private User saveUser(String nickname, String profileImageUrl) {
 		return userRepository.save(new User(null, null, nickname, profileImageUrl, time(0), time(0)));
+	}
+
+	private User saveUser(String nickname, String profileImageUrl, Gender gender) {
+		return userRepository.save(new User(null, null, nickname, profileImageUrl, gender, time(0), time(0)));
 	}
 
 	private List<Message> saveMessages(TestContext context, int count) {

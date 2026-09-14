@@ -2,6 +2,7 @@ package com.suspiciouslions.backend.domain.chat.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.suspiciouslions.backend.domain.chat.entity.JoinRequestStatus;
+import com.suspiciouslions.backend.domain.user.entity.Gender;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 
@@ -13,6 +14,7 @@ public record JoinRequestStatusResponse(
 		Long roomId,
 		Long userId,
 		String nickname,
-		String profileImageUrl
+		String profileImageUrl,
+		Gender gender
 ) {
 }

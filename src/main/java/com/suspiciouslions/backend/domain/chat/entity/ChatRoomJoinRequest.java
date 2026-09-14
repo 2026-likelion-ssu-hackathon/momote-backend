@@ -3,6 +3,7 @@ package com.suspiciouslions.backend.domain.chat.entity;
 import java.time.OffsetDateTime;
 
 import com.suspiciouslions.backend.domain.user.entity.User;
+import com.suspiciouslions.backend.domain.user.entity.Gender;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -41,6 +42,10 @@ public class ChatRoomJoinRequest {
 	@Column(name = "profile_image_public_id")
 	private String profileImagePublicId;
 
+	@Enumerated(EnumType.STRING)
+	@Column
+	private Gender gender;
+
 	@Column(name = "requested_at", nullable = false, columnDefinition = "timestamptz")
 	private OffsetDateTime requestedAt;
 
@@ -53,11 +58,17 @@ public class ChatRoomJoinRequest {
 
 	public ChatRoomJoinRequest(ChatRoom chatRoom, String nickname, String profileImageUrl,
 			String profileImagePublicId, OffsetDateTime requestedAt) {
+		this(chatRoom, nickname, profileImageUrl, profileImagePublicId, null, requestedAt);
+	}
+
+	public ChatRoomJoinRequest(ChatRoom chatRoom, String nickname, String profileImageUrl,
+			String profileImagePublicId, Gender gender, OffsetDateTime requestedAt) {
 		this.chatRoom = chatRoom;
 		this.status = JoinRequestStatus.PENDING;
 		this.nickname = nickname;
 		this.profileImageUrl = profileImageUrl;
 		this.profileImagePublicId = profileImagePublicId;
+		this.gender = gender;
 		this.requestedAt = requestedAt;
 	}
 
@@ -83,6 +94,10 @@ public class ChatRoomJoinRequest {
 
 	public String getProfileImagePublicId() {
 		return profileImagePublicId;
+	}
+
+	public Gender getGender() {
+		return gender;
 	}
 
 	public OffsetDateTime getRequestedAt() {

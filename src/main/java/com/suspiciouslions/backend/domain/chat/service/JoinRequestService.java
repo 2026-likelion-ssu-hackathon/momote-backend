@@ -26,6 +26,7 @@ import com.suspiciouslions.backend.domain.chat.entity.JoinRequestStatus;
 import com.suspiciouslions.backend.domain.chat.repository.ChatRoomJoinRequestRepository;
 import com.suspiciouslions.backend.domain.chat.repository.ChatRoomRepository;
 import com.suspiciouslions.backend.domain.user.entity.User;
+import com.suspiciouslions.backend.domain.user.entity.Gender;
 import com.suspiciouslions.backend.domain.user.repository.UserRepository;
 import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage;
 import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage.UploadedProfileImage;
@@ -62,7 +63,8 @@ public class JoinRequestService {
 		return joinRequestRepository.findByChatRoomIdAndStatusOrderByRequestedAtAscIdAsc(roomId, status)
 				.stream()
 				.map(request -> new JoinRequestListItemResponse(
-						request.getId(), request.getNickname(), request.getProfileImageUrl(), request.getRequestedAt()))
+						request.getId(), request.getNickname(), request.getProfileImageUrl(),
+						request.getGender(), request.getRequestedAt()))
 				.toList();
 	}
 
@@ -77,7 +79,7 @@ public class JoinRequestService {
 
 			OffsetDateTime now = OffsetDateTime.now();
 			User user = userRepository.save(new User(
-					null, null, request.getNickname(), request.getProfileImageUrl(), now, now));
+					null, null, request.getNickname(), request.getProfileImageUrl(), request.getGender(), now, now));
 			room.assignUserB(user);
 			request.accept(user);
 
@@ -109,7 +111,8 @@ public class JoinRequestService {
 		return outcome.response();
 	}
 
-	public CreateJoinRequestResponse create(String inviteCode, String nickname, MultipartFile profileImage) {
+	public CreateJoinRequestResponse create(String inviteCode, String nickname,
+			MultipartFile profileImage, Gender gender) {
 		ProfileImageValidation.validate(profileImage);
 		AtomicReference<UploadedProfileImage> uploaded = new AtomicReference<>();
 		try {
@@ -126,6 +129,7 @@ public class JoinRequestService {
 						nickname,
 						image == null ? null : image.secureUrl(),
 						image == null ? null : image.publicId(),
+						gender,
 						OffsetDateTime.now()
 				));
 				return new CreateJoinRequestResponse(request.getId(), room.getId(), request.getStatus());
@@ -139,12 +143,16 @@ public class JoinRequestService {
 		}
 	}
 
+	public CreateJoinRequestResponse create(String inviteCode, String nickname, MultipartFile profileImage) {
+		return create(inviteCode, nickname, profileImage, null);
+	}
+
 	@Transactional(readOnly = true)
 	public JoinRequestStatusResponse getStatus(Long requestId) {
 		ChatRoomJoinRequest request = joinRequestRepository.findById(requestId)
 				.orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Join request not found"));
 		if (request.getStatus() != JoinRequestStatus.ACCEPTED) {
-			return new JoinRequestStatusResponse(request.getId(), request.getStatus(), null, null, null, null);
+			return new JoinRequestStatusResponse(request.getId(), request.getStatus(), null, null, null, null, null);
 		}
 		User user = request.getAssignedUser();
 		return new JoinRequestStatusResponse(
@@ -153,7 +161,8 @@ public class JoinRequestService {
 				request.getChatRoom().getId(),
 				user == null ? null : user.getId(),
 				request.getNickname(),
-				request.getProfileImageUrl()
+				request.getProfileImageUrl(),
+				user == null ? request.getGender() : user.getGender()
 		);
 	}
 
