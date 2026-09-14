@@ -33,6 +33,7 @@ import com.suspiciouslions.backend.domain.chat.entity.RoomStatus;
 import com.suspiciouslions.backend.domain.chat.repository.ChatRoomRepository;
 import com.suspiciouslions.backend.domain.chat.repository.MessageRepository;
 import com.suspiciouslions.backend.domain.user.entity.User;
+import com.suspiciouslions.backend.domain.user.entity.Gender;
 import com.suspiciouslions.backend.domain.user.repository.UserRepository;
 import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage;
 import com.suspiciouslions.backend.domain.user.storage.ProfileImageStorage.UploadedProfileImage;
@@ -93,7 +94,8 @@ public class ChatService {
 		return new JoinChatRoomResponse(room.getId(), user.getId());
 	}
 
-	public ParticipantClaimResponse claimNickname(Long chatRoomId, Long userId, String nickname, MultipartFile profileImage) {
+	public ParticipantClaimResponse claimNickname(Long chatRoomId, Long userId, String nickname,
+			MultipartFile profileImage, Gender gender) {
 		ProfileImageValidation.validate(profileImage);
 		AtomicReference<UploadedProfileImage> uploaded = new AtomicReference<>();
 		try {
@@ -105,8 +107,9 @@ public class ChatService {
 				UploadedProfileImage image = profileImage == null ? null : profileImageStorage.upload(profileImage);
 				uploaded.set(image);
 				String profileImageUrl = image == null ? null : image.secureUrl();
-				user.claimProfile(nickname, profileImageUrl, OffsetDateTime.now());
-				return new ParticipantClaimResponse(user.getId(), user.getNickname(), user.getProfileImageUrl());
+				user.claimProfile(nickname, profileImageUrl, gender, OffsetDateTime.now());
+				return new ParticipantClaimResponse(
+						user.getId(), user.getNickname(), user.getProfileImageUrl(), user.getGender());
 			});
 			return Objects.requireNonNull(response);
 		} catch (ProfileImageStorageException exception) {
@@ -115,6 +118,11 @@ public class ChatService {
 			compensateUploadedImage(uploaded.get());
 			throw exception;
 		}
+	}
+
+	public ParticipantClaimResponse claimNickname(Long chatRoomId, Long userId, String nickname,
+			MultipartFile profileImage) {
+		return claimNickname(chatRoomId, userId, nickname, profileImage, null);
 	}
 
 	private void compensateUploadedImage(UploadedProfileImage uploaded) {
@@ -134,7 +142,8 @@ public class ChatService {
 				: chatRoom.getUserA();
 
 		PartnerResponse partnerResponse = partner == null ? null
-				: new PartnerResponse(partner.getId(), partner.getNickname(), partner.getProfileImageUrl());
+				: new PartnerResponse(
+						partner.getId(), partner.getNickname(), partner.getProfileImageUrl(), partner.getGender());
 		return new ChatRoomResponse(
 				chatRoom.getId(),
 				chatRoom.getRoomStatus(),

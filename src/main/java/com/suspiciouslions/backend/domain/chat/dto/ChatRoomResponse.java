@@ -3,6 +3,7 @@ package com.suspiciouslions.backend.domain.chat.dto;
 import java.time.LocalDate;
 
 import com.suspiciouslions.backend.domain.chat.entity.RoomStatus;
+import com.suspiciouslions.backend.domain.user.entity.Gender;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 
@@ -26,7 +27,9 @@ public record ChatRoomResponse(
 			String nickname,
 			@Schema(description = "상대방 프로필 이미지 URL", example = "https://example.com/profile.png",
 					nullable = true)
-			String profileImageUrl
+			String profileImageUrl,
+			@Schema(description = "상대방 성별", allowableValues = {"MALE", "FEMALE"}, nullable = true)
+			Gender gender
 	) {
 	}
 }

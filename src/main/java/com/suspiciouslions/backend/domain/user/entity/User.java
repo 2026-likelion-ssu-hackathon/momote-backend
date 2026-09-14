@@ -4,6 +4,8 @@ import java.time.OffsetDateTime;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -29,6 +31,10 @@ public class User {
 	@Column(name = "profile_image_url")
 	private String profileImageUrl;
 
+	@Enumerated(EnumType.STRING)
+	@Column
+	private Gender gender;
+
 	@Column(name = "created_at", nullable = false, columnDefinition = "timestamptz")
 	private OffsetDateTime createdAt;
 
@@ -40,10 +46,16 @@ public class User {
 
 	public User(String authProvider, String providerUserId, String nickname, String profileImageUrl,
 			OffsetDateTime createdAt, OffsetDateTime updatedAt) {
+		this(authProvider, providerUserId, nickname, profileImageUrl, null, createdAt, updatedAt);
+	}
+
+	public User(String authProvider, String providerUserId, String nickname, String profileImageUrl,
+			Gender gender, OffsetDateTime createdAt, OffsetDateTime updatedAt) {
 		this.authProvider = authProvider;
 		this.providerUserId = providerUserId;
 		this.nickname = nickname;
 		this.profileImageUrl = profileImageUrl;
+		this.gender = gender;
 		this.createdAt = createdAt;
 		this.updatedAt = updatedAt;
 	}
@@ -68,6 +80,10 @@ public class User {
 		return profileImageUrl;
 	}
 
+	public Gender getGender() {
+		return gender;
+	}
+
 	public OffsetDateTime getCreatedAt() {
 		return createdAt;
 	}
@@ -81,9 +97,10 @@ public class User {
 		this.updatedAt = updatedAt;
 	}
 
-	public void claimProfile(String nickname, String profileImageUrl, OffsetDateTime updatedAt) {
+	public void claimProfile(String nickname, String profileImageUrl, Gender gender, OffsetDateTime updatedAt) {
 		this.nickname = nickname;
 		this.profileImageUrl = profileImageUrl;
+		this.gender = gender;
 		this.updatedAt = updatedAt;
 	}
 }
